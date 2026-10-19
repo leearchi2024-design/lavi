@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>我的記帳本</title>
+
+  <!-- 安裝成 App 的設定 -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#f3efe3">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="記帳本">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@500;700;900&family=Space+Mono:wght@400;700&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1 id="page-title">我的記帳本</h1>
+    </header>
+    <main id="view"></main>
+  </div>
+
+  <!-- 記一筆按鈕 -->
+  <button id="fab" class="fab" data-action="add-tx"><span aria-hidden="true">✦</span> 記一筆 <span aria-hidden="true">✦</span></button>
+
+  <!-- 底部分頁 -->
+  <nav class="tabbar" aria-label="主要分頁">
+    <div class="tabbar-inner">
+      <button data-action="tab" data-tab="home"><span class="tab-ic" data-icon="castle"></span>首頁</button>
+      <button data-action="tab" data-tab="records"><span class="tab-ic" data-icon="scroll"></span>明細</button>
+      <button data-action="tab" data-tab="accounts"><span class="tab-ic" data-icon="chest"></span>帳戶</button>
+      <button data-action="tab" data-tab="plan"><span class="tab-ic" data-icon="map"></span>規劃</button>
+      <button data-action="tab" data-tab="reports"><span class="tab-ic" data-icon="orb"></span>報表</button>
+    </div>
+  </nav>
+
+  <!-- 彈出表單 -->
+  <div id="sheet-layer" class="sheet-layer" hidden>
+    <div class="scrim" data-action="close-sheet"></div>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <div class="sheet-head">
+        <h3 id="sheet-title"></h3>
+        <button class="icon-btn" data-action="close-sheet" aria-label="關閉">✕</button>
+      </div>
+      <div id="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
