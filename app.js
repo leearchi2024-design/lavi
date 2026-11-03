@@ -149,6 +149,7 @@ function persist() {
   save(KEYS.recurring, recurring);
   save(KEYS.wishlist, wishlist);
   save(KEYS.plan, plan);
+  scheduleSync();   // 資料有變動 → 稍後自動同步到 Google 試算表
 }
 
 // 畫面狀態（不需要保存）
@@ -687,6 +688,8 @@ function viewReports() {
         <b class="num ${b < 0 ? "expense" : ""}">${money(b)}</b></div>`;
     }).join("") : `<div class="empty">還沒有帳戶。</div>`}
   </section>`;
+
+  h += syncCard();
 
   h += `<section class="card"><h2>資料管理</h2>
     <p class="small muted">資料存在這個瀏覽器裡。要換到手機或其他電腦時，先在這裡備份，再到新裝置還原。</p>
@@ -1306,7 +1309,8 @@ function restoreFrom(file) {
 }
 
 async function clearAll() {
-  const ok = await askConfirm("這會刪除所有帳戶、紀錄、固定支出和存錢筒，而且無法復原。建議先備份。確定要清除嗎？", "全部清除", true);
+  const sheetNote = syncEnabled() ? "已同步到 Google 試算表的紀錄也會一起刪除。" : "";
+  const ok = await askConfirm(`這會刪除所有帳戶、紀錄、固定支出和存錢筒，而且無法復原。${sheetNote}建議先備份。確定要清除嗎？`, "全部清除", true);
   if (!ok) return;
   accounts = [];
   transactions = [];
@@ -1349,6 +1353,217 @@ function checkReminders(isStartup) {
   if (newDue) {
     if ($("sheet-layer").hidden) render();
     toast(isStartup ? `有 ${newDue} 筆固定支出到期，請到首頁確認` : "有固定支出到期了");
+  }
+}
+
+// ========== 7-2. Google 試算表同步 ==========
+// 做法：記住「試算表上已經有哪些紀錄、內容是什麼」，
+// 每次資料變動後拿目前的紀錄來比對，只把不一樣的送出去。
+// 沒網路或送失敗時，差異會留著，下次有網路再自動補送。
+const SYNC_KEYS = { settings: "bookkeeping-sync-settings", state: "bookkeeping-sync-state", last: "bookkeeping-sync-last" };
+let syncSettings = load(SYNC_KEYS.settings, { url: "", token: "" });
+let syncState = load(SYNC_KEYS.state, {});   // { 紀錄 id: 送到試算表時的內容 }
+const sync = { busy: false, again: false, error: "", lastOk: load(SYNC_KEYS.last, null) };
+let syncTimer;
+
+function syncEnabled() { return !!(syncSettings.url && syncSettings.token); }
+
+// 一筆紀錄在試算表上的樣子
+function sheetRow(t) {
+  const typeName = { expense: "支出", income: "收入", transfer: "轉帳" };
+  return {
+    date: t.date,
+    type: typeName[t.type],
+    category: t.category || (t.alloc ? "資金分配" : ""),
+    amount: t.amount,
+    account: accountName(t.accountId),
+    toAccount: t.toAccountId ? accountName(t.toAccountId) : "",
+    note: t.note || ""
+  };
+}
+
+// 找出還沒同步的變動
+function pendingOps() {
+  const ops = [];
+  const current = {};
+  for (const t of transactions) {
+    const row = sheetRow(t);
+    const fingerprint = JSON.stringify(row);
+    current[t.id] = true;
+    if (syncState[t.id] !== fingerprint) ops.push({ op: "upsert", id: String(t.id), row, fingerprint });
+  }
+  for (const id of Object.keys(syncState)) {
+    if (!current[id]) ops.push({ op: "delete", id });
+  }
+  return ops;
+}
+
+function scheduleSync() {
+  if (!syncEnabled()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(flushSync, 1500);   // 等 1.5 秒，連續修改時合併成一次送出
+}
+
+async function postToSheet(payload) {
+  let res;
+  try {
+    res = await fetch(syncSettings.url, {
+      method: "POST",
+      body: JSON.stringify(Object.assign({ token: syncSettings.token }, payload))
+    });
+  } catch (e) {
+    throw new Error("連不到試算表，請檢查網路或部署網址");
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    throw new Error("試算表沒有正確回應，請確認網址是 /exec 結尾，而且存取權設成「所有人」");
+  }
+  if (!data.ok) throw new Error(data.error || "同步失敗");
+  return data;
+}
+
+async function flushSync() {
+  if (!syncEnabled()) return;
+  if (sync.busy) { sync.again = true; return; }
+  const ops = pendingOps();
+  if (!ops.length) { refreshSyncCard(); return; }
+  if (navigator.onLine === false) {
+    sync.error = "目前沒有網路，有網路時會自動補送";
+    refreshSyncCard();
+    return;
+  }
+
+  sync.busy = true;
+  refreshSyncCard();
+  try {
+    for (let i = 0; i < ops.length; i += 200) {
+      const batch = ops.slice(i, i + 200);
+      await postToSheet({ ops: batch.map(o => ({ op: o.op, id: o.id, row: o.row })) });
+      for (const o of batch) {
+        if (o.op === "delete") delete syncState[o.id];
+        else syncState[o.id] = o.fingerprint;
+      }
+      save(SYNC_KEYS.state, syncState);
+    }
+    sync.error = "";
+    sync.lastOk = new Date().toISOString();
+    save(SYNC_KEYS.last, sync.lastOk);
+  } catch (e) {
+    sync.error = e.message;
+  }
+  sync.busy = false;
+  refreshSyncCard();
+  if (sync.again) { sync.again = false; flushSync(); }
+}
+
+function timeText(iso) {
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function syncCard() {
+  if (!syncEnabled()) {
+    return `<section class="card" id="sync-card">
+      <div class="sec-head"><h2>Google 試算表同步</h2><span class="pill">未啟用</span></div>
+      <p class="small muted">每次記帳後，自動把紀錄送到你的 Google 試算表。手機和電腦的紀錄會集中在同一張表。</p>
+      <button class="btn-primary" data-action="sync-settings">設定同步</button>
+    </section>`;
+  }
+  const pending = pendingOps().length;
+  const pill = sync.busy ? `<span class="pill pill-soon">同步中…</span>`
+    : sync.error ? `<span class="pill pill-due">沒有同步</span>`
+    : pending ? `<span class="pill pill-soon">${pending} 筆待同步</span>`
+    : `<span class="pill pill-done">已同步</span>`;
+  return `<section class="card" id="sync-card">
+    <div class="sec-head"><h2>Google 試算表同步</h2>${pill}</div>
+    ${sync.error ? `<p class="small expense">${esc(sync.error)}</p>` : ""}
+    <p class="small muted">${sync.lastOk ? "上次同步 " + timeText(sync.lastOk) : "還沒有同步過"}${pending ? ` · ${pending} 筆待同步` : ""}</p>
+    <div class="btn-grid">
+      <button class="btn-secondary" data-action="sync-now" ${sync.busy ? "disabled" : ""}>立即同步</button>
+      <button class="btn-secondary" data-action="sync-settings">同步設定</button>
+    </div>
+  </section>`;
+}
+
+function refreshSyncCard() {
+  const el = $("sync-card");
+  if (el) el.outerHTML = syncCard();
+}
+
+function resetSyncState() {
+  syncState = {};
+  save(SYNC_KEYS.state, syncState);
+}
+
+function openSyncSettings() {
+  openSheet("Google 試算表同步", `<form id="sync-form" novalidate>
+    <p class="small muted">在試算表建立同步程式並部署後，把「網頁應用程式網址」和同步密碼貼在這裡。手機和電腦要各設定一次。</p>
+    ${field("網頁應用程式網址", `<input id="f-url" value="${esc(syncSettings.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" spellcheck="false">`)}
+    ${field("同步密碼", `<input id="f-token" value="${esc(syncSettings.token)}" placeholder="和同步程式裡的 TOKEN 一樣" autocomplete="off" spellcheck="false">`)}
+    ${syncEnabled() ? `<div class="btn-grid">
+        <button type="button" class="btn-secondary" id="f-resync">全部重新同步</button>
+        <button type="button" class="btn-danger" id="f-stop">停止同步</button>
+      </div>
+      <p class="small muted">改了帳戶名稱，或試算表的資料被誤刪時，按「全部重新同步」，會把這台裝置的紀錄全部重送一次，不會重複。</p>` : ""}
+    ${formActions(false, "測試並儲存")}
+  </form>`);
+
+  bindSave("sync-form", async () => {
+    const url = $("f-url").value.trim();
+    const token = $("f-token").value.trim();
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(url)) {
+      return showErr("網址格式不對。請貼上部署後拿到的網址，開頭是 https://script.google.com/macros/s/，結尾是 /exec。");
+    }
+    if (!token) return showErr("請輸入同步密碼。");
+
+    const btn = $("sync-form").querySelector("[data-save]");
+    btn.disabled = true;
+    btn.textContent = "測試連線中…";
+    showErr("");
+
+    const old = syncSettings;
+    syncSettings = { url, token };
+    try {
+      await postToSheet({ ops: [] });   // 只測試連線和密碼，不送資料
+    } catch (e) {
+      syncSettings = old;
+      btn.disabled = false;
+      btn.textContent = "測試並儲存";
+      return showErr(e.message);
+    }
+    if (old.url !== url) resetSyncState();   // 換了一張試算表 → 全部重送
+    save(SYNC_KEYS.settings, syncSettings);
+    sync.error = "";
+    sync.lastOk = new Date().toISOString();
+    save(SYNC_KEYS.last, sync.lastOk);
+    closeSheet();
+    render();
+    toast("連線成功，開始同步");
+    flushSync();
+  });
+
+  if (syncEnabled()) {
+    $("f-resync").onclick = () => {
+      resetSyncState();
+      sync.error = "";
+      closeSheet();
+      render();
+      toast("開始全部重新同步");
+      flushSync();
+    };
+    $("f-stop").onclick = () => {
+      syncSettings = { url: "", token: "" };
+      save(SYNC_KEYS.settings, syncSettings);
+      resetSyncState();
+      sync.error = "";
+      sync.lastOk = null;
+      save(SYNC_KEYS.last, null);
+      closeSheet();
+      render();
+      toast("已停止同步，試算表裡的資料會保留");
+    };
   }
 }
 
@@ -1398,6 +1613,9 @@ document.addEventListener("click", e => {
     case "backup": backup(); break;
     case "restore": $("restore-file").click(); break;
     case "clear-all": clearAll(); break;
+
+    case "sync-settings": openSyncSettings(); break;
+    case "sync-now": sync.error = ""; flushSync(); break;
   }
 });
 
@@ -1415,6 +1633,11 @@ document.addEventListener("keydown", e => {
 document.querySelectorAll("[data-icon]").forEach(el => { el.innerHTML = icon(el.dataset.icon); });
 render();
 checkReminders(true);
+
+// 同步：打開 App 時、恢復網路時、以及每分鐘檢查一次有沒有沒送出去的紀錄
+flushSync();
+window.addEventListener("online", () => { sync.error = ""; flushSync(); });
+setInterval(() => { if (syncEnabled() && !sync.busy && pendingOps().length) flushSync(); }, 60000);
 
 // 啟用離線功能（用網址打開時才會啟用，直接雙擊檔案打開不會）
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
