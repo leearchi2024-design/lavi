@@ -16,7 +16,8 @@ const KEYS = {
   recurring: "bookkeeping-recurring",
   wishlist: "bookkeeping-wishlist",
   plan: "bookkeeping-allocation",
-  checks: "bookkeeping-checks"
+  checks: "bookkeeping-checks",
+  stocks: "bookkeeping-stocks"
 };
 
 const CATEGORIES = {
@@ -67,6 +68,7 @@ const ICONS = {
   castle: `<path d="M24 19 V5"/><path class="k" d="M24 5 L32 8 L24 11 Z"/><path class="f" d="M8 41 V19 H13 V13 H19 V19 H29 V13 H35 V19 H40 V41 Z"/><path class="k" d="M20 41 V33 Q24 28 28 33 V41 Z"/>`,
   scroll: `<rect class="f" x="11" y="9" width="26" height="32" rx="3"/><path class="f" d="M8 7 H40 Q43 7 43 10.5 Q43 14 40 14 H8 Q5 14 5 10.5 Q5 7 8 7 Z"/><path d="M17 21 H31 M17 27 H31 M17 33 H26"/>`,
   map: `<path class="f" d="M5 12 L17 8 L31 12 L43 8 V36 L31 40 L17 36 L5 40 Z"/><path d="M17 8 V36 M31 12 V40"/><path d="M21 21 L27 27 M27 21 L21 27" stroke-width="3"/>`,
+  chart: `<rect class="f" x="5" y="8" width="38" height="32" rx="4"/><path d="M11 33 L19 24 L25 28 L36 15"/><path d="M29 15 H36 V22"/><circle class="k n" cx="19" cy="24" r="2.3"/><circle class="k n" cx="25" cy="28" r="2.3"/>`,
   orb: `<path class="f" d="M13 35 H35 L38 43 H10 Z"/><circle class="f" cx="24" cy="19" r="14"/><path d="M16 15 Q18 9 24 8"/><path class="k n" d="M28 17 L29.6 21.4 L34 23 L29.6 24.6 L28 29 L26.4 24.6 L22 23 L26.4 21.4 Z"/>`
 };
 
@@ -114,7 +116,7 @@ function heroStats() {
   return { exp, level, rank, from: expNeeded(level), to: expNeeded(level + 1) };
 }
 const WEEKDAYS = "日一二三四五六";
-const TITLES = { home: "我的記帳本", records: "明細", accounts: "帳戶", plan: "規劃", reports: "報表" };
+const TITLES = { home: "我的記帳本", records: "明細", accounts: "帳戶", plan: "規劃", stocks: "股票", reports: "報表" };
 
 // ========== 2. 資料讀取與儲存 ==========
 // 若瀏覽器不允許 localStorage，改存在記憶體（重新整理後會消失）
@@ -144,6 +146,7 @@ let recurring = load(KEYS.recurring, []);
 let wishlist = load(KEYS.wishlist, []);
 let plan = load(KEYS.plan, []);
 let checks = load(KEYS.checks, []);   // 資金確認紀錄
+let stocks = load(KEYS.stocks, []);   // 股票
 
 function persist() {
   save(KEYS.accounts, accounts);
@@ -152,6 +155,7 @@ function persist() {
   save(KEYS.wishlist, wishlist);
   save(KEYS.plan, plan);
   save(KEYS.checks, checks);
+  save(KEYS.stocks, stocks);
   markDirty();      // 記下哪些資料要上傳到雲端
   scheduleSync();   // 資料有變動 → 稍後自動同步到 Google 試算表
 }
@@ -328,7 +332,7 @@ function allocatedThisMonth() {
 // ========== 5. 畫面 ==========
 function render() {
   $("page-title").textContent = TITLES[ui.tab];
-  const views = { home: viewHome, records: viewRecords, accounts: viewAccounts, plan: viewPlan, reports: viewReports };
+  const views = { home: viewHome, records: viewRecords, accounts: viewAccounts, plan: viewPlan, stocks: viewStocks, reports: viewReports };
   $("view").innerHTML = views[ui.tab]();
   document.querySelectorAll(".tabbar button").forEach(b => {
     const on = b.dataset.tab === ui.tab;
@@ -410,6 +414,7 @@ function reminderItems() {
   const items = [];
   const cp = checkPeriod();
   if (accounts.length && !checkDone(cp)) items.push({ kind: "check", period: cp });
+  for (const st of stocksAtTarget()) items.push({ kind: "stock", st, q: quotes[st.code] });
   for (const r of recurring) {
     const s = recurringStatus(r);
     if (s.state === "due" || s.state === "soon") items.push({ kind: "rec", r, s });
@@ -428,6 +433,15 @@ function viewReminders() {
   const items = reminderItems();
   if (!items.length) return "";
   const rows = items.map(it => {
+    if (it.kind === "stock") {
+      return `<div class="row remind is-due">
+        <span class="row-main">
+          <b>${esc(it.st.code)} ${esc(it.st.name)} <span class="pill pill-done">到目標價了</span></b>
+          <small>現價 ${priceText(it.q.price)}，目標 ${priceText(it.st.target)} 以下</small>
+        </span>
+        <span class="row-actions"><button class="btn-sm primary" data-action="tab" data-tab="stocks">查看</button></span>
+      </div>`;
+    }
     if (it.kind === "check") {
       const days = daysBetween(it.period, todayStr());
       return `<div class="row remind is-due">
@@ -461,7 +475,7 @@ function viewReminders() {
       <span class="row-actions"><button class="btn-sm primary" data-action="pay-card" data-id="${it.c.id}">繳費</button></span>
     </div>`;
   }).join("");
-  return `<section><h2>待繳提醒</h2><div class="list">${rows}</div></section>`;
+  return `<section><h2>提醒</h2><div class="list">${rows}</div></section>`;
 }
 
 function viewWeek() {
@@ -1297,7 +1311,7 @@ function exportCsv() {
 }
 
 function backup() {
-  const data = { app: "bookkeeping", version: 2, exportedAt: new Date().toISOString(), accounts, transactions, recurring, wishlist, plan, checks };
+  const data = { app: "bookkeeping", version: 2, exportedAt: new Date().toISOString(), accounts, transactions, recurring, wishlist, plan, checks, stocks };
   download(`記帳備份-${todayStr()}.json`, JSON.stringify(data, null, 2), "application/json");
 }
 
@@ -1320,6 +1334,7 @@ function restoreFrom(file) {
     wishlist = d.wishlist || [];
     plan = d.plan || [];
     checks = d.checks || [];
+    stocks = d.stocks || [];
     persist();
     render();
     toast("已還原備份");
@@ -1329,7 +1344,7 @@ function restoreFrom(file) {
 
 async function clearAll() {
   const sheetNote = syncEnabled() && dataBase !== null ? "已連結雲端同步，手機和電腦上的資料會一起刪除。" : "";
-  const ok = await askConfirm(`這會刪除所有帳戶、紀錄、固定支出、存錢筒和資金確認，而且無法復原。${sheetNote}建議先備份。確定要清除嗎？`, "全部清除", true);
+  const ok = await askConfirm(`這會刪除所有帳戶、紀錄、固定支出、存錢筒、資金確認和股票，而且無法復原。${sheetNote}建議先備份。確定要清除嗎？`, "全部清除", true);
   if (!ok) return;
   accounts = [];
   transactions = [];
@@ -1337,6 +1352,7 @@ async function clearAll() {
   wishlist = [];
   plan = [];
   checks = [];
+  stocks = [];
   persist();
   render();
   toast("已清除全部資料");
@@ -1543,6 +1559,231 @@ function openCheckDetail(c) {
   });
 }
 
+// ========== 7-3. 股票 ==========
+// 股價透過 Google 試算表的同步程式查詢（瀏覽器不能直接向證交所查）
+// quotes 只存在這台裝置；股票清單（stocks）會跟著雲端同步
+let quotes = load("bookkeeping-quotes", {});
+const quoteState = { busy: false, error: "", at: load("bookkeeping-quotes-at", 0) };
+const STOCK_ALERT_KEY = "bookkeeping-stock-alerted";
+
+function priceText(n) {
+  return Number(n).toLocaleString("zh-TW", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
+function sharesText(n) {
+  const lots = n / 1000;
+  if (n >= 1000 && Number.isInteger(lots)) return `${lots.toLocaleString("zh-TW")} 張`;
+  return `${Number(n).toLocaleString("zh-TW")} 股`;
+}
+
+// 台股交易時間：週一到週五 9:00–13:30（多留 5 分鐘收盤）
+function marketOpen() {
+  const now = new Date();
+  const day = now.getDay();
+  const hm = now.getHours() * 60 + now.getMinutes();
+  return day >= 1 && day <= 5 && hm >= 9 * 60 && hm <= 13 * 60 + 35;
+}
+
+function stocksAtTarget() {
+  return stocks.filter(st => st.target > 0 && quotes[st.code] && quotes[st.code].price <= st.target);
+}
+
+// 台股習慣：漲是紅色、跌是綠色
+function changeText(q) {
+  if (!q || !q.prev) return { cls: "muted", text: "—" };
+  const d = q.price - q.prev;
+  const pct = d / q.prev * 100;
+  if (Math.abs(d) < 1e-9) return { cls: "muted", text: "平盤" };
+  return {
+    cls: d > 0 ? "up" : "down",
+    text: `${d > 0 ? "▲" : "▼"} ${priceText(Math.abs(d))}（${d > 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}%）`
+  };
+}
+
+async function fetchQuotes(force) {
+  if (!stocks.length || quoteState.busy) return;
+  if (!syncEnabled()) {
+    quoteState.error = "要先在「報表」設定雲端同步，才能查詢股價。";
+    if (ui.tab === "stocks") render();
+    return;
+  }
+  if (!force && Date.now() - quoteState.at < (marketOpen() ? 25000 : 10 * 60000)) return;
+
+  quoteState.busy = true;
+  if (ui.tab === "stocks") render();
+  const codes = [...new Set(stocks.map(s => s.code))];
+  try {
+    const res = await postToSheet({ action: "quotes", codes }, 4);
+    Object.assign(quotes, res.quotes || {});
+    save("bookkeeping-quotes", quotes);
+    quoteState.at = Date.now();
+    save("bookkeeping-quotes-at", quoteState.at);
+    const missing = codes.filter(c => !(res.quotes || {})[c]);
+    quoteState.error = missing.length ? `查不到 ${missing.join("、")} 的股價，請確認股票代號。` : "";
+    notifyTargets();
+  } catch (e) {
+    quoteState.error = e.message;
+  }
+  quoteState.busy = false;
+  if (ui.tab === "stocks" || ui.tab === "home") render();
+}
+
+// 到目標價時提醒（同一檔股票一天只提醒一次）
+function notifyTargets() {
+  const alerted = load(STOCK_ALERT_KEY, {});
+  const today = todayStr();
+  const fresh = stocksAtTarget().filter(st => alerted[st.code + ":" + st.target] !== today);
+  if (!fresh.length) return;
+  for (const st of fresh) alerted[st.code + ":" + st.target] = today;
+  save(STOCK_ALERT_KEY, alerted);
+  const names = fresh.map(st => `${st.code} ${st.name}`).join("、");
+  toast(`${names} 到目標價了`);
+  try {
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("股票到目標價了", { body: fresh.map(st => `${st.code} ${st.name} 現價 ${priceText(quotes[st.code].price)}，目標 ${priceText(st.target)}`).join("\n") });
+    }
+  } catch (e) { /* 不支援通知 */ }
+}
+
+function viewStocks() {
+  const list = [...stocks].sort((a, b) => a.code.localeCompare(b.code));
+  let mv = 0, cost = 0, day = 0, held = 0;
+  for (const st of list) {
+    const q = quotes[st.code];
+    if (!st.shares || !q) continue;
+    held++;
+    mv += st.shares * q.price;
+    cost += st.shares * (st.cost || 0);
+    if (q.prev) day += st.shares * (q.price - q.prev);
+  }
+  const pl = mv - cost;
+  const plPct = cost > 0 ? pl / cost * 100 : 0;
+  const signCls = v => v > 0 ? "up" : v < 0 ? "down" : "";
+  const signed = v => (v > 0 ? "+" : "") + money(v);
+  const src = [...new Set(list.map(st => quotes[st.code]?.source).filter(Boolean))].join("、");
+
+  let h = `<section class="card">
+    <div class="sec-head"><h2>我的持股</h2><button class="btn-sm" data-action="refresh-quotes" ${quoteState.busy ? "disabled" : ""}>${quoteState.busy ? "更新中…" : "更新股價"}</button></div>
+    <div class="stock-total"><small>總市值</small><b class="num">${money(mv)}</b></div>
+    <div class="duo">
+      <div><small>未實現損益</small><b class="num ${signCls(pl)}">${signed(pl)}</b>${cost > 0 ? `<small class="num ${signCls(pl)}">${pl >= 0 ? "+" : "−"}${Math.abs(plPct).toFixed(2)}%</small>` : ""}</div>
+      <div><small>今日漲跌</small><b class="num ${signCls(day)}">${signed(day)}</b></div>
+    </div>
+    ${quoteState.error ? `<p class="small expense">${esc(quoteState.error)}</p>` : ""}
+    <p class="small muted">${quoteState.at ? "股價更新 " + timeText(new Date(quoteState.at).toISOString()) : "還沒查詢過股價"}${src ? " · " + esc(src) : ""} · ${marketOpen() ? "交易時間每 30 秒自動更新" : "目前非交易時間"}</p>
+    <p class="small muted">股票獨立管理，不會影響記帳本的帳戶餘額和淨資產。漲紅跌綠。</p>
+  </section>`;
+
+  h += `<section>
+    <div class="sec-head"><h2>股票清單 <small>${list.length} 檔</small></h2><button class="link" data-action="add-stock">＋ 新增股票</button></div>`;
+  if (!list.length) {
+    h += `<div class="empty">${icon("chart", "empty-ic")}<span>輸入股票代號，例如 2330、0050，就能追蹤即時股價。可以只當觀察清單，也可以記下持有股數和成本。</span></div>`;
+    return h + `</section>`;
+  }
+
+  h += `<div class="stack">${list.map(st => {
+    const q = quotes[st.code];
+    const ch = changeText(q);
+    const hit = st.target > 0 && q && q.price <= st.target;
+    const value = q && st.shares ? st.shares * q.price : 0;
+    const gain = q && st.shares ? value - st.shares * (st.cost || 0) : 0;
+    const gainPct = st.cost > 0 && q ? (q.price - st.cost) / st.cost * 100 : 0;
+    let targetLine = "";
+    if (st.target > 0) {
+      targetLine = hit
+        ? `<p class="small"><span class="pill pill-done">到目標價了</span> 現價已在目標 ${priceText(st.target)} 以下</p>`
+        : `<p class="small muted">目標買入價 ${priceText(st.target)} 以下${q ? ` · 還要再跌 ${((q.price - st.target) / q.price * 100).toFixed(1)}%` : ""}</p>`;
+    }
+    return `<div class="card stock-card ${hit ? "is-hit" : ""}">
+      <button class="cc-top" data-action="edit-stock" data-id="${st.id}">
+        <span class="code-badge num">${esc(st.code)}</span>
+        <span class="row-main"><b>${esc(st.name && st.name !== st.code ? st.name : (q?.name || st.code))}</b><small>${esc(q?.market || "台股")}${q?.time ? " · " + esc(q.time) : ""}${st.note ? " · " + esc(st.note) : ""}</small></span>
+        <span class="row-end"><b class="num stock-price">${q ? priceText(q.price) : "—"}</b><small class="num ${ch.cls}">${ch.text}</small></span>
+      </button>
+      ${st.shares > 0 ? `<div class="trio">
+        <div><small>持有</small><b class="num">${sharesText(st.shares)}</b></div>
+        <div><small>市值</small><b class="num">${q ? money(value) : "—"}</b></div>
+        <div><small>損益（均價 ${priceText(st.cost || 0)}）</small><b class="num ${signCls(gain)}">${q ? signed(gain) : "—"}</b>${q && st.cost > 0 ? `<small class="num ${signCls(gain)}">${gainPct >= 0 ? "+" : "−"}${Math.abs(gainPct).toFixed(2)}%</small>` : ""}</div>
+      </div>` : ""}
+      ${targetLine}
+    </div>`;
+  }).join("")}</div>`;
+  return h + `</section>`;
+}
+
+function openStockForm(st) {
+  const x = st || { code: "", name: "", shares: "", cost: "", target: "", note: "" };
+  let notFound = "";   // 查不到的代號；按第二次儲存仍可加入
+  openSheet(st ? "編輯股票" : "新增股票", `<form id="stock-form" novalidate>
+    <div class="form-row">
+      ${field("股票代號", `<input id="f-code" value="${esc(x.code)}" placeholder="例如 2330、0050" maxlength="6" autocomplete="off" spellcheck="false">`)}
+      ${field("名稱", `<input id="f-name" value="${esc(x.name)}" placeholder="查詢後自動帶入" maxlength="20">`)}
+    </div>
+    <button type="button" class="btn-secondary" id="f-lookup">查詢股價</button>
+    <p class="small muted" id="f-quote">${st && quotes[st.code] ? `現價 ${priceText(quotes[st.code].price)}` : "輸入代號後按「查詢股價」，確認是哪一檔。"}</p>
+    <div class="form-row">
+      ${field("持有股數（1 張 = 1000 股）", `<input id="f-shares" type="number" inputmode="numeric" min="0" step="1" value="${x.shares}" placeholder="0 = 只觀察">`)}
+      ${field("平均成本（每股）", `<input id="f-cost" type="number" inputmode="decimal" min="0" step="any" value="${x.cost}" placeholder="例如 850">`)}
+    </div>
+    ${field("目標買入價（跌到這個價格以下時提醒你）", `<input id="f-target" type="number" inputmode="decimal" min="0" step="any" value="${x.target}" placeholder="不需要提醒就留空">`)}
+    ${field("備註", `<input id="f-note" value="${esc(x.note)}" placeholder="例如：長期存股" maxlength="30">`)}
+    ${formActions(!!st)}
+  </form>`);
+
+  $("f-lookup").onclick = async () => {
+    const code = $("f-code").value.trim().toUpperCase();
+    if (!/^[0-9A-Z]{4,6}$/.test(code)) return showErr("股票代號是 4 到 6 碼的數字或英文，例如 2330、00878。");
+    if (!syncEnabled()) return showErr("要先在「報表」設定雲端同步，才能查詢股價。名稱可以先自己輸入。");
+    showErr("");
+    $("f-lookup").disabled = true;
+    $("f-lookup").textContent = "查詢中…";
+    try {
+      const res = await postToSheet({ action: "quotes", codes: [code] }, 4);
+      const q = (res.quotes || {})[code];
+      if (!q) {
+        notFound = code;
+        showErr(`查不到 ${code}，請確認代號是台股上市或上櫃的股票。`);
+      } else {
+        quotes[code] = q;
+        save("bookkeeping-quotes", quotes);
+        if (q.name) $("f-name").value = q.name;
+        $("f-quote").textContent = `${q.name || code}（${q.market || "台股"}）現價 ${priceText(q.price)} · ${q.source}`;
+      }
+    } catch (e) {
+      showErr(e.message);
+    }
+    $("f-lookup").disabled = false;
+    $("f-lookup").textContent = "查詢股價";
+  };
+
+  if (st) {
+    armDelete($("f-del"), () => {
+      stocks = stocks.filter(y => y.id !== st.id);
+      afterChange("已刪除");
+    });
+  }
+
+  bindSave("stock-form", () => {
+    const code = $("f-code").value.trim().toUpperCase();
+    if (!/^[0-9A-Z]{4,6}$/.test(code)) return showErr("股票代號是 4 到 6 碼的數字或英文，例如 2330、00878。");
+    if (!st && stocks.some(y => y.code === code)) return showErr(`${code} 已經在清單裡了，請直接點它來修改。`);
+    if (notFound === code) {
+      notFound = "";
+      return showErr(`查不到 ${code} 的股價。確定代號沒錯的話，再按一次「儲存」仍會加入。`);
+    }
+    const shares = Number($("f-shares").value) || 0;
+    const cost = Number($("f-cost").value) || 0;
+    const target = Number($("f-target").value) || 0;
+    if (shares < 0 || cost < 0 || target < 0) return showErr("數字不能是負的。");
+    if (shares > 0 && !cost) return showErr("有持股的話，請填平均成本，才能算損益。");
+    const data = { code, name: $("f-name").value.trim() || quotes[code]?.name || code, shares, cost, target, note: $("f-note").value.trim() };
+    if (st) Object.assign(st, data);
+    else stocks.push(Object.assign({ id: uid() }, data));
+    afterChange(st ? "已更新" : "已加入股票清單");
+    fetchQuotes(true);
+  });
+}
+
 // ========== 7-2. Google 試算表同步 ==========
 // 做法：記住「試算表上已經有哪些紀錄、內容是什麼」，
 // 每次資料變動後拿目前的紀錄來比對，只把不一樣的送出去。
@@ -1669,9 +1910,9 @@ let dataBase = load(DATA_KEYS.base, null);
 let dirty = load(DATA_KEYS.dirty, {});
 let serverRev = load(DATA_KEYS.rev, 0);
 
-const COLLECTIONS = ["acc", "tx", "rec", "wish", "chk"];
+const COLLECTIONS = ["acc", "tx", "rec", "wish", "chk", "stk"];
 function collection(col) {
-  return { acc: accounts, tx: transactions, rec: recurring, wish: wishlist, chk: checks }[col];
+  return { acc: accounts, tx: transactions, rec: recurring, wish: wishlist, chk: checks, stk: stocks }[col];
 }
 
 // 這台裝置上的所有資料，每筆一把鑰匙，例如 "tx:1730..."
@@ -1721,6 +1962,7 @@ function saveLocalOnly() {
   save(KEYS.wishlist, wishlist);
   save(KEYS.plan, plan);
   save(KEYS.checks, checks);
+  save(KEYS.stocks, stocks);
   save(DATA_KEYS.base, dataBase);
   save(DATA_KEYS.dirty, dirty);
   save(DATA_KEYS.rev, serverRev);
@@ -1779,7 +2021,7 @@ async function downloadRemote() {
   const nTx = res.changes.filter(c => c.data && c.key.startsWith("tx:")).length;
   const ok = await askConfirm(`雲端有 ${nAcc} 個帳戶、${nTx} 筆紀錄。下載後，這台裝置目前的資料會被雲端的資料取代。確定要下載嗎？`, "下載雲端資料", true);
   if (!ok) return;
-  accounts = []; transactions = []; recurring = []; wishlist = []; checks = []; plan = [];
+  accounts = []; transactions = []; recurring = []; wishlist = []; checks = []; plan = []; stocks = [];
   dataBase = {};
   dirty = {};
   applyRemote(res.changes);
@@ -1975,7 +2217,7 @@ document.addEventListener("click", e => {
   const id = Number(el.dataset.id);
 
   switch (action) {
-    case "tab": ui.tab = el.dataset.tab; window.scrollTo(0, 0); render(); break;
+    case "tab": ui.tab = el.dataset.tab; window.scrollTo(0, 0); render(); if (ui.tab === "stocks") fetchQuotes(false); break;
     case "close-sheet": dismissSheet(); break;
 
     case "add-tx": openTxForm(null); break;
@@ -2017,6 +2259,10 @@ document.addEventListener("click", e => {
     case "start-check": openCheckForm(); break;
     case "view-check": openCheckDetail(checks.find(c => c.id === id)); break;
 
+    case "add-stock": openStockForm(null); break;
+    case "edit-stock": openStockForm(stocks.find(x => x.id === id)); break;
+    case "refresh-quotes": fetchQuotes(true); break;
+
     case "sync-settings": openSyncSettings(); break;
     case "sync-now": sync.error = ""; flushSync(); break;
     case "sync-download": downloadRemote(); break;
@@ -2043,6 +2289,11 @@ flushSync();
 window.addEventListener("online", () => { sync.error = ""; flushSync(); });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) flushSync(); });   // 切回 App 時
 setInterval(() => { if (syncEnabled() && !document.hidden) flushSync(); }, 60000);            // 開著時每分鐘
+
+// 股價：打開 App 時查一次；之後在「股票」或「首頁」時自動更新（交易時間每 30 秒、其他時間每 10 分鐘）
+fetchQuotes(false);
+setInterval(() => { if (!document.hidden && (ui.tab === "stocks" || ui.tab === "home")) fetchQuotes(false); }, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) fetchQuotes(false); });
 
 // 啟用離線功能（用網址打開時才會啟用，直接雙擊檔案打開不會）
 if ("serviceWorker" in navigator && location.protocol !== "file:") {

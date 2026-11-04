@@ -301,7 +301,7 @@ button.row:hover { background: var(--bg); }
   padding-left: max(8px, env(safe-area-inset-left, 0px));
   padding-right: max(8px, env(safe-area-inset-right, 0px));
 }
-.tabbar-inner { max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: repeat(5, 1fr); }
+.tabbar-inner { max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: repeat(6, 1fr); }
 .tabbar button {
   display: flex; flex-direction: column; align-items: center; gap: 3px;
   background: none; border: 0; padding: 2px;
@@ -418,3 +418,27 @@ input, select {
 .c-diff { font-size: 12px; font-weight: 700; text-align: right; }
 .check-opt { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.5; }
 .check-opt input { width: 18px; height: 18px; flex: none; margin-top: 2px; accent-color: var(--ink); }
+
+/* ---------- 17. 股票 ---------- */
+.up { color: var(--expense); }      /* 台股：漲是紅色 */
+.down { color: var(--income); }     /* 台股：跌是綠色 */
+.code-badge {
+  flex: none; min-width: 54px; height: 44px; padding: 0 6px; border-radius: 14px;
+  border: 2px solid var(--ink); background: var(--pop);
+  display: grid; place-items: center; font-size: 13px; font-weight: 700;
+}
+.stock-price { font-size: 18px; }
+.stock-card.is-hit { background: #fff6d6; }
+.trio > div small.num { font-size: 11.5px; }
+@media (max-width: 380px) {
+  .tab-ic { width: 40px; height: 40px; padding: 6px; }
+  .tabbar button { font-size: 11px; }
+}
+.stock-total { display: flex; flex-direction: column; }
+.stock-total small { color: var(--muted); font-size: 12px; font-weight: 700; }
+.stock-total b { font-size: 28px; line-height: 1.2; }
+.duo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.duo > div { display: flex; flex-direction: column; min-width: 0; }
+.duo small { color: var(--muted); font-size: 12px; font-weight: 700; }
+.duo b { font-size: 16px; }
+.stock-card .trio b { white-space: normal; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.35; }
