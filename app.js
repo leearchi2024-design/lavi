@@ -15,7 +15,8 @@ const KEYS = {
   tx: "bookkeeping-transactions",
   recurring: "bookkeeping-recurring",
   wishlist: "bookkeeping-wishlist",
-  plan: "bookkeeping-allocation"
+  plan: "bookkeeping-allocation",
+  checks: "bookkeeping-checks"
 };
 
 const CATEGORIES = {
@@ -105,7 +106,7 @@ function heroSvg() {
 const RANKS = [[1, "見習冒險者"], [3, "木劍劍士"], [5, "銅盾戰士"], [8, "銀甲騎士"], [12, "金冠勇者"], [16, "傳說理財王"]];
 function expNeeded(level) { return 25 * level * (level - 1); }  // 升到這一級需要的總經驗
 function heroStats() {
-  const exp = transactions.length * 10 + wishlist.filter(w => w.bought).length * 50;
+  const exp = transactions.length * 10 + wishlist.filter(w => w.bought).length * 50 + checks.length * 20;
   let level = 1;
   while (exp >= expNeeded(level + 1)) level++;
   let rank = RANKS[0][1];
@@ -142,6 +143,7 @@ let transactions = load(KEYS.tx, []);
 let recurring = load(KEYS.recurring, []);
 let wishlist = load(KEYS.wishlist, []);
 let plan = load(KEYS.plan, []);
+let checks = load(KEYS.checks, []);   // 資金確認紀錄
 
 function persist() {
   save(KEYS.accounts, accounts);
@@ -149,6 +151,7 @@ function persist() {
   save(KEYS.recurring, recurring);
   save(KEYS.wishlist, wishlist);
   save(KEYS.plan, plan);
+  save(KEYS.checks, checks);
   scheduleSync();   // 資料有變動 → 稍後自動同步到 Google 試算表
 }
 
@@ -387,7 +390,7 @@ function viewHome() {
       <b class="hero-amt num">${money(net)}</b>
       <span class="hero-sub">銀行存款 ${money(bankTotal)} · 信用卡待繳 ${money(cardOwed)}</span>
     </div>
-    <p class="hero-tip">每記一筆帳 +10 exp，存錢筒買到 +50 exp</p>
+    <p class="hero-tip">每記一筆帳 +10 exp，資金確認 +20 exp，存錢筒買到 +50 exp</p>
   </section>`;
 
   h += viewReminders();
@@ -404,6 +407,8 @@ function viewHome() {
 
 function reminderItems() {
   const items = [];
+  const cp = checkPeriod();
+  if (accounts.length && !checkDone(cp)) items.push({ kind: "check", period: cp });
   for (const r of recurring) {
     const s = recurringStatus(r);
     if (s.state === "due" || s.state === "soon") items.push({ kind: "rec", r, s });
@@ -422,6 +427,16 @@ function viewReminders() {
   const items = reminderItems();
   if (!items.length) return "";
   const rows = items.map(it => {
+    if (it.kind === "check") {
+      const days = daysBetween(it.period, todayStr());
+      return `<div class="row remind is-due">
+        <span class="row-main">
+          <b>資金確認 ${md(it.period)} <span class="pill pill-due">${days === 0 ? "今天" : "待確認"}</span></b>
+          <small>對照銀行 App，確認各帳戶的實際餘額</small>
+        </span>
+        <span class="row-actions"><button class="btn-sm primary" data-action="start-check">開始確認</button></span>
+      </div>`;
+    }
     if (it.kind === "rec") {
       const due = it.s.state === "due";
       return `<div class="row remind ${due ? "is-due" : ""}">
@@ -519,9 +534,11 @@ function viewRecords() {
 
 // ---- 5-3 帳戶 ----
 function viewAccounts() {
+  // 資金確認
+  let h = viewChecks();
   // 銀行帳戶
   const bs = banks();
-  let h = `<section>
+  h += `<section>
     <div class="sec-head"><h2>銀行帳戶</h2><button class="link" data-action="add-account">＋ 新增帳戶</button></div>`;
   h += bs.length ? `<div class="list">${bs.map(a => {
     const hasCard = linkedCards(a).length > 0;
@@ -1279,7 +1296,7 @@ function exportCsv() {
 }
 
 function backup() {
-  const data = { app: "bookkeeping", version: 1, exportedAt: new Date().toISOString(), accounts, transactions, recurring, wishlist, plan };
+  const data = { app: "bookkeeping", version: 2, exportedAt: new Date().toISOString(), accounts, transactions, recurring, wishlist, plan, checks };
   download(`記帳備份-${todayStr()}.json`, JSON.stringify(data, null, 2), "application/json");
 }
 
@@ -1301,6 +1318,7 @@ function restoreFrom(file) {
     recurring = d.recurring || [];
     wishlist = d.wishlist || [];
     plan = d.plan || [];
+    checks = d.checks || [];
     persist();
     render();
     toast("已還原備份");
@@ -1310,13 +1328,14 @@ function restoreFrom(file) {
 
 async function clearAll() {
   const sheetNote = syncEnabled() ? "已同步到 Google 試算表的紀錄也會一起刪除。" : "";
-  const ok = await askConfirm(`這會刪除所有帳戶、紀錄、固定支出和存錢筒，而且無法復原。${sheetNote}建議先備份。確定要清除嗎？`, "全部清除", true);
+  const ok = await askConfirm(`這會刪除所有帳戶、紀錄、固定支出、存錢筒和資金確認，而且無法復原。${sheetNote}建議先備份。確定要清除嗎？`, "全部清除", true);
   if (!ok) return;
   accounts = [];
   transactions = [];
   recurring = [];
   wishlist = [];
   plan = [];
+  checks = [];
   persist();
   render();
   toast("已清除全部資料");
@@ -1356,6 +1375,173 @@ function checkReminders(isStartup) {
   }
 }
 
+// ========== 7-1. 資金確認（每月 5 號、17 號對帳） ==========
+const CHECK_DAYS = [5, 17];
+
+// 目前這一期的確認日：今天以前最近的 5 號或 17 號
+function checkPeriod(dateStr = todayStr()) {
+  const d = parseDate(dateStr);
+  const y = d.getFullYear(), m = d.getMonth(), day = d.getDate();
+  if (day >= CHECK_DAYS[1]) return toStr(new Date(y, m, CHECK_DAYS[1]));
+  if (day >= CHECK_DAYS[0]) return toStr(new Date(y, m, CHECK_DAYS[0]));
+  return toStr(new Date(y, m - 1, CHECK_DAYS[1]));
+}
+
+// 下一次確認日
+function nextCheckDate(dateStr = todayStr()) {
+  const d = parseDate(dateStr);
+  const y = d.getFullYear(), m = d.getMonth(), day = d.getDate();
+  if (day < CHECK_DAYS[0]) return toStr(new Date(y, m, CHECK_DAYS[0]));
+  if (day < CHECK_DAYS[1]) return toStr(new Date(y, m, CHECK_DAYS[1]));
+  return toStr(new Date(y, m + 1, CHECK_DAYS[0]));
+}
+
+function checkDone(period) { return checks.some(c => c.period === period); }
+
+// 記帳本上的金額：銀行帳戶 = 餘額；信用卡 = 待繳金額
+function bookValue(a) { return a.kind === "card" ? cardInfo(a).owed : balanceOf(a); }
+
+function checkSummary(c) {
+  const diffs = c.items.filter(i => i.diff !== 0);
+  const total = diffs.reduce((s, i) => s + Math.abs(i.diff), 0);
+  if (!diffs.length) return { pill: `<span class="pill pill-done">全部相符</span>`, text: "全部相符" };
+  return {
+    pill: `<span class="pill ${c.adjusted ? "pill-soon" : "pill-due"}">${diffs.length} 個帳戶有差額</span>`,
+    text: `差額合計 ${money(total)}${c.adjusted ? "，已補調整紀錄" : "，未調整"}`
+  };
+}
+
+function viewChecks() {
+  const cp = checkPeriod();
+  const done = checks.find(c => c.period === cp);
+  const history = [...checks].sort((a, b) => b.date !== a.date ? b.date.localeCompare(a.date) : b.id - a.id).slice(0, 6);
+
+  let h = `<section>
+    <div class="sec-head"><h2>資金確認 <small>每月 5 號、17 號</small></h2></div>
+    <div class="card">`;
+  if (!accounts.length) {
+    h += `<p class="small muted">新增帳戶後，每月 5 號和 17 號會提醒你對照銀行 App，確認各帳戶的實際餘額。</p>`;
+  } else if (done) {
+    const s = checkSummary(done);
+    h += `<div class="kv"><b>${md(cp)} 這一期</b>${s.pill}</div>
+      <p class="small muted">${md(done.date)} 已確認 · ${s.text}。下一次是 ${md(nextCheckDate())}。</p>
+      <button class="btn-secondary" data-action="start-check">再確認一次</button>`;
+  } else {
+    h += `<div class="kv"><b>${md(cp)} 這一期</b><span class="pill pill-due">待確認</span></div>
+      <p class="small muted">打開各銀行 App 或存摺，輸入實際餘額，記帳本會幫你找出差額。</p>
+      <button class="btn-primary" data-action="start-check">開始確認</button>`;
+  }
+  h += `</div>`;
+  if (history.length) {
+    h += `<div class="list">${history.map(c => {
+      const s = checkSummary(c);
+      return `<button class="row" data-action="view-check" data-id="${c.id}">
+        <span class="badge" style="background:#ffffff">${icon("scroll")}</span>
+        <span class="row-main"><b>${md(c.period)} 期 ${s.pill}</b><small>${md(c.date)} 確認 · ${s.text}</small></span>
+      </button>`;
+    }).join("")}</div>`;
+  }
+  return h + `</section>`;
+}
+
+function openCheckForm() {
+  if (!accounts.length) return toast("請先新增帳戶");
+  const period = checkPeriod();
+  const list = [...banks(), ...cards()];
+
+  openSheet(`資金確認 ${md(period)}`, `<form id="check-form" novalidate>
+    <p class="small muted">對照各銀行 App 或存摺，輸入現在的實際金額。已經先填入記帳本的金額，一樣的就不用改。</p>
+    <div class="check-list">
+      ${list.map(a => {
+        const book = bookValue(a);
+        return `<div class="check-row" data-id="${a.id}" data-book="${book}">
+          <span class="check-name"><span class="dot" style="background:${a.color}"></span><b>${esc(a.bank)}</b>
+            <small class="muted">${a.kind === "card" ? "信用卡待繳" : "記帳本"} ${money(book)}</small></span>
+          <input class="c-actual" type="number" inputmode="decimal" step="any" value="${book}" aria-label="${esc(a.bank)} 實際金額">
+          <small class="c-diff muted">相符</small>
+        </div>`;
+      }).join("")}
+    </div>
+    <div class="kv total"><span>差額合計</span><b class="num" id="c-total">NT$ 0</b></div>
+    <label class="check-opt"><input type="checkbox" id="c-adjust" checked> 有差額的帳戶，自動補一筆「對帳調整」紀錄，讓記帳本和實際金額一致</label>
+    ${formActions(false, "完成確認")}
+  </form>`);
+
+  function update() {
+    let total = 0;
+    document.querySelectorAll("#check-form .check-row").forEach(row => {
+      const book = Number(row.dataset.book);
+      const actual = Number(row.querySelector(".c-actual").value);
+      const diff = Math.round((actual - book) * 100) / 100;
+      const el = row.querySelector(".c-diff");
+      if (row.querySelector(".c-actual").value === "" || isNaN(actual)) {
+        el.textContent = "請輸入金額"; el.className = "c-diff expense";
+      } else if (diff === 0) {
+        el.textContent = "相符"; el.className = "c-diff muted";
+      } else {
+        el.textContent = `差 ${diff > 0 ? "+" : ""}${money(diff)}`; el.className = "c-diff expense";
+        total += Math.abs(diff);
+      }
+    });
+    $("c-total").textContent = money(total);
+  }
+  document.querySelectorAll("#check-form .c-actual").forEach(inp => { inp.oninput = update; });
+  update();
+
+  bindSave("check-form", () => {
+    const rows = [...document.querySelectorAll("#check-form .check-row")];
+    if (rows.some(r => r.querySelector(".c-actual").value === "")) return showErr("每個帳戶都要填實際金額。");
+    const adjust = $("c-adjust").checked;
+    const today = todayStr();
+    const items = rows.map(r => {
+      const a = findAccount(Number(r.dataset.id));
+      const book = Number(r.dataset.book);
+      const actual = Number(r.querySelector(".c-actual").value);
+      return { accountId: a.id, name: a.bank, kind: a.kind, book, actual, diff: Math.round((actual - book) * 100) / 100 };
+    });
+
+    let n = 0;
+    if (adjust) {
+      for (const it of items) {
+        if (it.diff === 0) continue;
+        // 銀行：實際比較多 → 收入；比較少 → 支出
+        // 信用卡：實際欠比較多 → 支出；欠比較少 → 收入
+        const moreMoney = it.kind === "card" ? it.diff < 0 : it.diff > 0;
+        transactions.push({
+          id: uid() + n, type: moreMoney ? "income" : "expense", amount: Math.abs(it.diff),
+          accountId: it.accountId, category: moreMoney ? "其他收入" : "其他",
+          date: today, note: `對帳調整（${md(period)} 資金確認）`, adjust: true
+        });
+        n++;
+      }
+    }
+    checks.push({ id: uid(), period, date: today, items, adjusted: adjust && n > 0 });
+    afterChange(n ? `資金確認完成，補了 ${n} 筆調整紀錄 +20 exp` : "資金確認完成 +20 exp");
+  });
+}
+
+function openCheckDetail(c) {
+  const s = checkSummary(c);
+  openSheet(`資金確認 ${md(c.period)}`, `<div class="stack">
+    <p class="small muted">${c.date.replaceAll("-", "/")} 確認 · ${s.text}</p>
+    <div class="card inset">
+      ${c.items.map(i => `<div class="kv">
+        <span>${esc(i.name)}${i.kind === "card" ? ` <small class="muted">待繳</small>` : ""}</span>
+        <span class="num">${money(i.actual)} ${i.diff === 0 ? `<small class="muted">相符</small>` : `<small class="expense">${i.diff > 0 ? "+" : ""}${money(i.diff)}</small>`}</span>
+      </div>`).join("")}
+    </div>
+    <p class="small muted">刪除這次確認不會刪除當時補的調整紀錄，調整紀錄可以到「明細」個別刪除。</p>
+    <div class="form-actions">
+      <button type="button" class="btn-danger" id="f-del">刪除</button>
+      <button type="button" class="btn-primary" data-action="close-sheet">關閉</button>
+    </div>
+  </div>`);
+  armDelete($("f-del"), () => {
+    checks = checks.filter(x => x.id !== c.id);
+    afterChange("已刪除這次確認");
+  });
+}
+
 // ========== 7-2. Google 試算表同步 ==========
 // 做法：記住「試算表上已經有哪些紀錄、內容是什麼」，
 // 每次資料變動後拿目前的紀錄來比對，只把不一樣的送出去。
@@ -1382,7 +1568,39 @@ function sheetRow(t) {
   };
 }
 
+// 資金確認：每個帳戶一列
+function checkRows() {
+  const rows = [];
+  for (const c of checks) {
+    for (const i of c.items) {
+      rows.push({
+        id: `${c.id}-${i.accountId}`,
+        row: {
+          date: c.date, period: c.period, account: i.name + (i.kind === "card" ? "（信用卡待繳）" : ""),
+          book: i.book, actual: i.actual, diff: i.diff,
+          status: i.diff === 0 ? "相符" : c.adjusted ? "已補調整" : "未調整"
+        }
+      });
+    }
+  }
+  return rows;
+}
+
+// 帳戶餘額總覽：每次有變動就整張重寫
+function balanceRows() {
+  const rows = accounts.map(a => {
+    if (a.kind === "card") {
+      const i = cardInfo(a);
+      return { account: a.bank, kind: "信用卡", purpose: "由 " + accountName(a.payAccountId) + " 扣款", balance: balanceOf(a), available: "", unbilled: i.unbilled, billed: i.billed };
+    }
+    return { account: a.bank, kind: "銀行", purpose: a.purpose || "", balance: balanceOf(a), available: availableOf(a), unbilled: "", billed: "" };
+  });
+  rows.push({ account: "淨資產", kind: "", purpose: "", balance: accounts.reduce((s, a) => s + balanceOf(a), 0), available: "", unbilled: "", billed: "" });
+  return rows;
+}
+
 // 找出還沒同步的變動
+// syncState 的鑰匙：記帳紀錄用 id、資金確認用 "c:" 開頭、帳戶餘額用 "balances"
 function pendingOps() {
   const ops = [];
   const current = {};
@@ -1390,10 +1608,23 @@ function pendingOps() {
     const row = sheetRow(t);
     const fingerprint = JSON.stringify(row);
     current[t.id] = true;
-    if (syncState[t.id] !== fingerprint) ops.push({ op: "upsert", id: String(t.id), row, fingerprint });
+    if (syncState[t.id] !== fingerprint) ops.push({ kind: "tx", key: String(t.id), op: "upsert", id: String(t.id), row, fingerprint });
   }
-  for (const id of Object.keys(syncState)) {
-    if (!current[id]) ops.push({ op: "delete", id });
+  for (const r of checkRows()) {
+    const key = "c:" + r.id;
+    const fingerprint = JSON.stringify(r.row);
+    current[key] = true;
+    if (syncState[key] !== fingerprint) ops.push({ kind: "check", key, op: "upsert", id: r.id, row: r.row, fingerprint });
+  }
+  for (const key of Object.keys(syncState)) {
+    if (key === "balances" || current[key]) continue;
+    if (key.startsWith("c:")) ops.push({ kind: "check", key, op: "delete", id: key.slice(2) });
+    else ops.push({ kind: "tx", key, op: "delete", id: key });
+  }
+  if (accounts.length || syncState.balances) {
+    const rows = balanceRows();
+    const fingerprint = JSON.stringify(rows);
+    if (syncState.balances !== fingerprint) ops.push({ kind: "balances", key: "balances", rows, fingerprint });
   }
   return ops;
 }
@@ -1409,7 +1640,7 @@ async function postToSheet(payload) {
   try {
     res = await fetch(syncSettings.url, {
       method: "POST",
-      body: JSON.stringify(Object.assign({ token: syncSettings.token }, payload))
+      body: JSON.stringify(Object.assign({ token: syncSettings.token }, payload, { needsV2: undefined }))
     });
   } catch (e) {
     throw new Error("連不到試算表，請檢查網路或部署網址");
@@ -1421,6 +1652,9 @@ async function postToSheet(payload) {
     throw new Error("試算表沒有正確回應，請確認網址是 /exec 結尾，而且存取權設成「所有人」");
   }
   if (!data.ok) throw new Error(data.error || "同步失敗");
+  if (payload.needsV2 && data.version !== 2) {
+    throw new Error("試算表裡的同步程式是舊版，請照教學貼上新版程式碼，並用「管理部署作業」部署新版本");
+  }
   return data;
 }
 
@@ -1440,10 +1674,15 @@ async function flushSync() {
   try {
     for (let i = 0; i < ops.length; i += 200) {
       const batch = ops.slice(i, i + 200);
-      await postToSheet({ ops: batch.map(o => ({ op: o.op, id: o.id, row: o.row })) });
+      const pick = kind => batch.filter(o => o.kind === kind).map(o => ({ op: o.op, id: o.id, row: o.row }));
+      const bal = batch.find(o => o.kind === "balances");
+      const payload = { ops: pick("tx"), checkOps: pick("check") };
+      if (bal) payload.balances = bal.rows;
+      payload.needsV2 = payload.checkOps.length > 0 || !!bal;
+      await postToSheet(payload);
       for (const o of batch) {
-        if (o.op === "delete") delete syncState[o.id];
-        else syncState[o.id] = o.fingerprint;
+        if (o.op === "delete") delete syncState[o.key];
+        else syncState[o.key] = o.fingerprint;
       }
       save(SYNC_KEYS.state, syncState);
     }
@@ -1467,11 +1706,11 @@ function syncCard() {
   if (!syncEnabled()) {
     return `<section class="card" id="sync-card">
       <div class="sec-head"><h2>Google 試算表同步</h2><span class="pill">未啟用</span></div>
-      <p class="small muted">每次記帳後，自動把紀錄送到你的 Google 試算表。手機和電腦的紀錄會集中在同一張表。</p>
+      <p class="small muted">每次記帳後，自動把記帳紀錄、帳戶餘額和資金確認送到你的 Google 試算表。手機和電腦的紀錄會集中在同一張表。</p>
       <button class="btn-primary" data-action="sync-settings">設定同步</button>
     </section>`;
   }
-  const pending = pendingOps().length;
+  const pending = pendingOps().filter(o => o.kind !== "balances").length;
   const pill = sync.busy ? `<span class="pill pill-soon">同步中…</span>`
     : sync.error ? `<span class="pill pill-due">沒有同步</span>`
     : pending ? `<span class="pill pill-soon">${pending} 筆待同步</span>`
@@ -1526,7 +1765,7 @@ function openSyncSettings() {
     const old = syncSettings;
     syncSettings = { url, token };
     try {
-      await postToSheet({ ops: [] });   // 只測試連線和密碼，不送資料
+      await postToSheet({ ops: [], needsV2: true });   // 只測試連線、密碼和程式版本，不送資料
     } catch (e) {
       syncSettings = old;
       btn.disabled = false;
@@ -1613,6 +1852,9 @@ document.addEventListener("click", e => {
     case "backup": backup(); break;
     case "restore": $("restore-file").click(); break;
     case "clear-all": clearAll(); break;
+
+    case "start-check": openCheckForm(); break;
+    case "view-check": openCheckDetail(checks.find(c => c.id === id)); break;
 
     case "sync-settings": openSyncSettings(); break;
     case "sync-now": sync.error = ""; flushSync(); break;

@@ -403,3 +403,18 @@ input, select {
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---------- 16. 資金確認 ---------- */
+.check-list { display: flex; flex-direction: column; }
+.check-row {
+  display: grid; grid-template-columns: 1fr 130px; gap: 2px 10px; align-items: center;
+  padding: 10px 0; border-top: 2px solid var(--soft);
+}
+.check-row:first-child { border-top: 0; }
+.check-name { display: flex; flex-direction: column; min-width: 0; grid-row: span 2; }
+.check-name b { display: flex; align-items: center; font-size: 14px; }
+.check-name small { font-size: 12px; font-family: var(--mono); }
+.c-actual { font-family: var(--mono); text-align: right; }
+.c-diff { font-size: 12px; font-weight: 700; text-align: right; }
+.check-opt { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.5; }
+.check-opt input { width: 18px; height: 18px; flex: none; margin-top: 2px; accent-color: var(--ink); }
