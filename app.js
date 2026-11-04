@@ -152,6 +152,7 @@ function persist() {
   save(KEYS.wishlist, wishlist);
   save(KEYS.plan, plan);
   save(KEYS.checks, checks);
+  markDirty();      // 記下哪些資料要上傳到雲端
   scheduleSync();   // 資料有變動 → 稍後自動同步到 Google 試算表
 }
 
@@ -1327,7 +1328,7 @@ function restoreFrom(file) {
 }
 
 async function clearAll() {
-  const sheetNote = syncEnabled() ? "已同步到 Google 試算表的紀錄也會一起刪除。" : "";
+  const sheetNote = syncEnabled() && dataBase !== null ? "已連結雲端同步，手機和電腦上的資料會一起刪除。" : "";
   const ok = await askConfirm(`這會刪除所有帳戶、紀錄、固定支出、存錢筒和資金確認，而且無法復原。${sheetNote}建議先備份。確定要清除嗎？`, "全部清除", true);
   if (!ok) return;
   accounts = [];
@@ -1635,12 +1636,13 @@ function scheduleSync() {
   syncTimer = setTimeout(flushSync, 1500);   // 等 1.5 秒，連續修改時合併成一次送出
 }
 
-async function postToSheet(payload) {
+// minVersion：這次需要的同步程式版本，試算表裡的程式太舊就提示更新
+async function postToSheet(payload, minVersion = 1) {
   let res;
   try {
     res = await fetch(syncSettings.url, {
       method: "POST",
-      body: JSON.stringify(Object.assign({ token: syncSettings.token }, payload, { needsV2: undefined }))
+      body: JSON.stringify(Object.assign({ token: syncSettings.token }, payload))
     });
   } catch (e) {
     throw new Error("連不到試算表，請檢查網路或部署網址");
@@ -1652,40 +1654,176 @@ async function postToSheet(payload) {
     throw new Error("試算表沒有正確回應，請確認網址是 /exec 結尾，而且存取權設成「所有人」");
   }
   if (!data.ok) throw new Error(data.error || "同步失敗");
-  if (payload.needsV2 && data.version !== 2) {
+  if ((data.version || 1) < minVersion) {
     throw new Error("試算表裡的同步程式是舊版，請照教學貼上新版程式碼，並用「管理部署作業」部署新版本");
   }
   return data;
 }
 
+// ---------- 雙向同步：手機和電腦共用同一份資料 ----------
+// dataBase：上次和雲端一致時，每筆資料的內容（null 代表這台還沒和雲端連結）
+// dirty：這台裝置改過、還沒上傳的資料 { 鑰匙: { u: 修改時間, fp: 內容（刪除為 null） } }
+// serverRev：已經下載到雲端的第幾版
+const DATA_KEYS = { base: "bookkeeping-sync-base", dirty: "bookkeeping-sync-dirty", rev: "bookkeeping-sync-rev" };
+let dataBase = load(DATA_KEYS.base, null);
+let dirty = load(DATA_KEYS.dirty, {});
+let serverRev = load(DATA_KEYS.rev, 0);
+
+const COLLECTIONS = ["acc", "tx", "rec", "wish", "chk"];
+function collection(col) {
+  return { acc: accounts, tx: transactions, rec: recurring, wish: wishlist, chk: checks }[col];
+}
+
+// 這台裝置上的所有資料，每筆一把鑰匙，例如 "tx:1730..."
+function localRecords() {
+  const m = {};
+  for (const col of COLLECTIONS) for (const r of collection(col)) m[col + ":" + r.id] = r;
+  m["plan:all"] = { items: plan };
+  return m;
+}
+
+// 資料變動後，記下哪些還沒上傳
+function markDirty() {
+  if (!syncEnabled() || dataBase === null) return;
+  const now = Date.now();
+  const cur = localRecords();
+  for (const k of Object.keys(cur)) {
+    const fp = JSON.stringify(cur[k]);
+    if (fp === dataBase[k]) { delete dirty[k]; continue; }
+    if (!dirty[k] || dirty[k].fp !== fp) dirty[k] = { u: now, fp };
+  }
+  for (const k of Object.keys(dataBase)) {
+    if (!(k in cur) && (!dirty[k] || dirty[k].fp !== null)) dirty[k] = { u: now, fp: null };
+  }
+  for (const k of Object.keys(dirty)) {
+    if (!(k in cur) && !(k in dataBase)) delete dirty[k];   // 新增後又刪掉，雲端不用知道
+  }
+  save(DATA_KEYS.dirty, dirty);
+}
+
+// 把雲端的一筆資料放進這台裝置
+function setLocalRecord(key, data) {
+  const i = key.indexOf(":");
+  const col = key.slice(0, i), id = key.slice(i + 1);
+  if (col === "plan") { plan = data ? data.items : []; return; }
+  const arr = collection(col);
+  if (!arr) return;
+  const idx = arr.findIndex(r => String(r.id) === id);
+  if (data === null) { if (idx >= 0) arr.splice(idx, 1); }
+  else if (idx >= 0) arr[idx] = data;
+  else arr.push(data);
+}
+
+function saveLocalOnly() {
+  save(KEYS.accounts, accounts);
+  save(KEYS.tx, transactions);
+  save(KEYS.recurring, recurring);
+  save(KEYS.wishlist, wishlist);
+  save(KEYS.plan, plan);
+  save(KEYS.checks, checks);
+  save(DATA_KEYS.base, dataBase);
+  save(DATA_KEYS.dirty, dirty);
+  save(DATA_KEYS.rev, serverRev);
+}
+
+// 套用雲端回傳的變動；這台在那之後又改過的不覆蓋
+function applyRemote(rows) {
+  let touched = false;
+  for (const row of rows) {
+    const d = dirty[row.key];
+    const fp = row.data === null ? null : JSON.stringify(row.data);
+    if (fp === null) delete dataBase[row.key]; else dataBase[row.key] = fp;
+    if (d && d.u > row.u) continue;   // 這台的修改比較新，等下次上傳
+    setLocalRecord(row.key, row.data);
+    delete dirty[row.key];
+    touched = true;
+  }
+  return touched;
+}
+
+async function syncData() {
+  const cur = localRecords();
+  const changes = Object.keys(dirty).map(k => ({
+    key: k, u: dirty[k].u, data: dirty[k].fp === null || !(k in cur) ? null : cur[k]
+  }));
+  let res = await postToSheet({ action: "sync", since: serverRev, changes }, 3);
+  if (res.rev < serverRev) {   // 雲端資料被重設過，重新整份下載
+    res = await postToSheet({ action: "sync", since: 0, changes: [] }, 3);
+  }
+  const touched = applyRemote(res.changes);
+  serverRev = res.rev;
+  saveLocalOnly();
+  if (touched) { render(); checkReminders(true); }
+}
+
+// 第一次連結：雲端沒資料就上傳這台的；雲端已有資料就等你決定要不要下載
+async function initData() {
+  const res = await postToSheet({ action: "sync", since: 0, changes: [] }, 3);
+  const live = res.changes.filter(c => c.data !== null && !c.key.startsWith("plan:"));
+  if (!live.length) {
+    dataBase = {};
+    dirty = {};
+    serverRev = res.rev;
+    saveLocalOnly();
+    markDirty();
+    await syncData();
+    return;
+  }
+  sync.remote = res;   // 先記著，等使用者按「下載雲端資料」
+}
+
+async function downloadRemote() {
+  if (!sync.remote) return;
+  const res = sync.remote;
+  const nAcc = res.changes.filter(c => c.data && c.key.startsWith("acc:")).length;
+  const nTx = res.changes.filter(c => c.data && c.key.startsWith("tx:")).length;
+  const ok = await askConfirm(`雲端有 ${nAcc} 個帳戶、${nTx} 筆紀錄。下載後，這台裝置目前的資料會被雲端的資料取代。確定要下載嗎？`, "下載雲端資料", true);
+  if (!ok) return;
+  accounts = []; transactions = []; recurring = []; wishlist = []; checks = []; plan = [];
+  dataBase = {};
+  dirty = {};
+  applyRemote(res.changes);
+  serverRev = res.rev;
+  sync.remote = null;
+  saveLocalOnly();
+  resetSyncState();
+  render();
+  toast("已下載雲端資料，之後兩邊會自動同步");
+  flushSync();
+}
+
+// 把記帳紀錄、帳戶餘額、資金確認送到試算表的分頁（給你看的表格）
+async function pushViews() {
+  const ops = pendingOps();
+  for (let i = 0; i < ops.length; i += 200) {
+    const batch = ops.slice(i, i + 200);
+    const pick = kind => batch.filter(o => o.kind === kind).map(o => ({ op: o.op, id: o.id, row: o.row }));
+    const bal = batch.find(o => o.kind === "balances");
+    const payload = { ops: pick("tx"), checkOps: pick("check") };
+    if (bal) payload.balances = bal.rows;
+    await postToSheet(payload, payload.checkOps.length || bal ? 2 : 1);
+    for (const o of batch) {
+      if (o.op === "delete") delete syncState[o.key];
+      else syncState[o.key] = o.fingerprint;
+    }
+    save(SYNC_KEYS.state, syncState);
+  }
+}
+
 async function flushSync() {
   if (!syncEnabled()) return;
   if (sync.busy) { sync.again = true; return; }
-  const ops = pendingOps();
-  if (!ops.length) { refreshSyncCard(); return; }
   if (navigator.onLine === false) {
     sync.error = "目前沒有網路，有網路時會自動補送";
     refreshSyncCard();
     return;
   }
-
   sync.busy = true;
   refreshSyncCard();
   try {
-    for (let i = 0; i < ops.length; i += 200) {
-      const batch = ops.slice(i, i + 200);
-      const pick = kind => batch.filter(o => o.kind === kind).map(o => ({ op: o.op, id: o.id, row: o.row }));
-      const bal = batch.find(o => o.kind === "balances");
-      const payload = { ops: pick("tx"), checkOps: pick("check") };
-      if (bal) payload.balances = bal.rows;
-      payload.needsV2 = payload.checkOps.length > 0 || !!bal;
-      await postToSheet(payload);
-      for (const o of batch) {
-        if (o.op === "delete") delete syncState[o.key];
-        else syncState[o.key] = o.fingerprint;
-      }
-      save(SYNC_KEYS.state, syncState);
-    }
+    if (dataBase === null) await initData();
+    else await syncData();
+    if (dataBase !== null) await pushViews();   // 還沒決定要不要下載雲端資料前，不更新表格
     sync.error = "";
     sync.lastOk = new Date().toISOString();
     save(SYNC_KEYS.last, sync.lastOk);
@@ -1705,20 +1843,32 @@ function timeText(iso) {
 function syncCard() {
   if (!syncEnabled()) {
     return `<section class="card" id="sync-card">
-      <div class="sec-head"><h2>Google 試算表同步</h2><span class="pill">未啟用</span></div>
-      <p class="small muted">每次記帳後，自動把記帳紀錄、帳戶餘額和資金確認送到你的 Google 試算表。手機和電腦的紀錄會集中在同一張表。</p>
+      <div class="sec-head"><h2>雲端同步</h2><span class="pill">未啟用</span></div>
+      <p class="small muted">連結你的 Google 試算表後，手機和電腦會共用同一份記帳本，兩邊都能記帳。試算表裡也會整理出記帳紀錄、帳戶餘額和資金確認。</p>
       <button class="btn-primary" data-action="sync-settings">設定同步</button>
     </section>`;
   }
-  const pending = pendingOps().filter(o => o.kind !== "balances").length;
+  if (sync.remote) {
+    return `<section class="card" id="sync-card">
+      <div class="sec-head"><h2>雲端同步</h2><span class="pill pill-soon">等你決定</span></div>
+      <p class="small">雲端已經有另一台裝置的記帳資料。要把這台裝置換成雲端的資料，和其他裝置共用嗎？</p>
+      <p class="small muted">下載後，這台目前的資料會被取代。不想取代的話，可以先「備份資料」。</p>
+      <div class="btn-grid">
+        <button class="btn-primary" data-action="sync-download">下載雲端資料</button>
+        <button class="btn-secondary" data-action="sync-settings">同步設定</button>
+      </div>
+    </section>`;
+  }
+  const pending = Object.keys(dirty).length;
   const pill = sync.busy ? `<span class="pill pill-soon">同步中…</span>`
     : sync.error ? `<span class="pill pill-due">沒有同步</span>`
-    : pending ? `<span class="pill pill-soon">${pending} 筆待同步</span>`
+    : pending ? `<span class="pill pill-soon">${pending} 筆待上傳</span>`
     : `<span class="pill pill-done">已同步</span>`;
   return `<section class="card" id="sync-card">
-    <div class="sec-head"><h2>Google 試算表同步</h2>${pill}</div>
+    <div class="sec-head"><h2>雲端同步</h2>${pill}</div>
     ${sync.error ? `<p class="small expense">${esc(sync.error)}</p>` : ""}
-    <p class="small muted">${sync.lastOk ? "上次同步 " + timeText(sync.lastOk) : "還沒有同步過"}${pending ? ` · ${pending} 筆待同步` : ""}</p>
+    <p class="small muted">${sync.lastOk ? "上次同步 " + timeText(sync.lastOk) : "還沒有同步過"}${pending ? ` · ${pending} 筆待上傳` : ""}</p>
+    <p class="small muted">手機和電腦共用同一份資料。打開 App 或切回 App 時會自動更新。</p>
     <div class="btn-grid">
       <button class="btn-secondary" data-action="sync-now" ${sync.busy ? "disabled" : ""}>立即同步</button>
       <button class="btn-secondary" data-action="sync-settings">同步設定</button>
@@ -1736,16 +1886,26 @@ function resetSyncState() {
   save(SYNC_KEYS.state, syncState);
 }
 
+function unlinkData() {
+  dataBase = null;
+  dirty = {};
+  serverRev = 0;
+  sync.remote = null;
+  save(DATA_KEYS.base, null);
+  save(DATA_KEYS.dirty, dirty);
+  save(DATA_KEYS.rev, 0);
+}
+
 function openSyncSettings() {
-  openSheet("Google 試算表同步", `<form id="sync-form" novalidate>
-    <p class="small muted">在試算表建立同步程式並部署後，把「網頁應用程式網址」和同步密碼貼在這裡。手機和電腦要各設定一次。</p>
+  openSheet("雲端同步設定", `<form id="sync-form" novalidate>
+    <p class="small muted">在試算表建立同步程式並部署後，把「網頁應用程式網址」和同步密碼貼在這裡。手機和電腦都要設定，填一樣的網址和密碼。</p>
     ${field("網頁應用程式網址", `<input id="f-url" value="${esc(syncSettings.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" spellcheck="false">`)}
     ${field("同步密碼", `<input id="f-token" value="${esc(syncSettings.token)}" placeholder="和同步程式裡的 TOKEN 一樣" autocomplete="off" spellcheck="false">`)}
     ${syncEnabled() ? `<div class="btn-grid">
         <button type="button" class="btn-secondary" id="f-resync">全部重新同步</button>
         <button type="button" class="btn-danger" id="f-stop">停止同步</button>
       </div>
-      <p class="small muted">改了帳戶名稱，或試算表的資料被誤刪時，按「全部重新同步」，會把這台裝置的紀錄全部重送一次，不會重複。</p>` : ""}
+      <p class="small muted">試算表的表格資料不完整時，按「全部重新同步」，會重新下載雲端資料並重整表格，不會重複。</p>` : ""}
     ${formActions(false, "測試並儲存")}
   </form>`);
 
@@ -1765,27 +1925,27 @@ function openSyncSettings() {
     const old = syncSettings;
     syncSettings = { url, token };
     try {
-      await postToSheet({ ops: [], needsV2: true });   // 只測試連線、密碼和程式版本，不送資料
+      await postToSheet({ ops: [] }, 3);   // 只測試連線、密碼和程式版本，不送資料
     } catch (e) {
       syncSettings = old;
       btn.disabled = false;
       btn.textContent = "測試並儲存";
       return showErr(e.message);
     }
-    if (old.url !== url) resetSyncState();   // 換了一張試算表 → 全部重送
+    if (old.url !== url) { resetSyncState(); unlinkData(); }   // 換了一張試算表 → 重新連結
     save(SYNC_KEYS.settings, syncSettings);
     sync.error = "";
-    sync.lastOk = new Date().toISOString();
-    save(SYNC_KEYS.last, sync.lastOk);
     closeSheet();
     render();
     toast("連線成功，開始同步");
-    flushSync();
+    await flushSync();
+    if (sync.remote) downloadRemote();
   });
 
   if (syncEnabled()) {
     $("f-resync").onclick = () => {
       resetSyncState();
+      if (dataBase !== null) { serverRev = 0; save(DATA_KEYS.rev, 0); }
       sync.error = "";
       closeSheet();
       render();
@@ -1796,12 +1956,13 @@ function openSyncSettings() {
       syncSettings = { url: "", token: "" };
       save(SYNC_KEYS.settings, syncSettings);
       resetSyncState();
+      unlinkData();
       sync.error = "";
       sync.lastOk = null;
       save(SYNC_KEYS.last, null);
       closeSheet();
       render();
-      toast("已停止同步，試算表裡的資料會保留");
+      toast("已停止同步，這台的資料和試算表都會保留");
     };
   }
 }
@@ -1858,6 +2019,7 @@ document.addEventListener("click", e => {
 
     case "sync-settings": openSyncSettings(); break;
     case "sync-now": sync.error = ""; flushSync(); break;
+    case "sync-download": downloadRemote(); break;
   }
 });
 
@@ -1879,7 +2041,8 @@ checkReminders(true);
 // 同步：打開 App 時、恢復網路時、以及每分鐘檢查一次有沒有沒送出去的紀錄
 flushSync();
 window.addEventListener("online", () => { sync.error = ""; flushSync(); });
-setInterval(() => { if (syncEnabled() && !sync.busy && pendingOps().length) flushSync(); }, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) flushSync(); });   // 切回 App 時
+setInterval(() => { if (syncEnabled() && !document.hidden) flushSync(); }, 60000);            // 開著時每分鐘
 
 // 啟用離線功能（用網址打開時才會啟用，直接雙擊檔案打開不會）
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
