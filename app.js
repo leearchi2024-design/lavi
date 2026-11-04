@@ -414,7 +414,7 @@ function reminderItems() {
   const items = [];
   const cp = checkPeriod();
   if (accounts.length && !checkDone(cp)) items.push({ kind: "check", period: cp });
-  for (const st of stocksAtTarget()) items.push({ kind: "stock", st, q: quotes[st.code] });
+  for (const a of stockAlerts()) items.push({ kind: "stock", st: a.st, q: a.q, side: a.kind, price: a.price });
   for (const r of recurring) {
     const s = recurringStatus(r);
     if (s.state === "due" || s.state === "soon") items.push({ kind: "rec", r, s });
@@ -436,8 +436,8 @@ function viewReminders() {
     if (it.kind === "stock") {
       return `<div class="row remind is-due">
         <span class="row-main">
-          <b>${esc(it.st.code)} ${esc(it.st.name)} <span class="pill pill-done">到目標價了</span></b>
-          <small>現價 ${priceText(it.q.price)}，目標 ${priceText(it.st.target)} 以下</small>
+          <b>${esc(it.st.code)} ${esc(it.st.name)} <span class="pill ${it.side === "buy" ? "pill-done" : "pill-due"}">${it.side === "buy" ? "到買入價了" : "到賣出價了"}</span></b>
+          <small>現價 ${priceText(it.q.price)}，${it.side === "buy" ? "買入價 " + priceText(it.price) + " 以下" : "賣出價 " + priceText(it.price) + " 以上"}</small>
         </span>
         <span class="row-actions"><button class="btn-sm primary" data-action="tab" data-tab="stocks">查看</button></span>
       </div>`;
@@ -454,16 +454,13 @@ function viewReminders() {
     }
     if (it.kind === "rec") {
       const due = it.s.state === "due";
-      return `<div class="row remind ${due ? "is-due" : ""}">
+      return `<button class="row remind ${due ? "is-due" : ""}" data-action="open-recurring" data-id="${it.r.id}">
         <span class="row-main">
           <b>${esc(it.r.name)} <span class="pill ${due ? "pill-due" : "pill-soon"}">${due ? "已到期" : it.s.label}</span></b>
           <small>${money(it.r.amount)} · 每月 ${it.r.day} 號 ${esc(it.r.time)} · ${esc(accountName(it.r.accountId))}</small>
         </span>
-        ${due ? `<span class="row-actions">
-          <button class="btn-sm" data-action="skip-recurring" data-id="${it.r.id}">略過</button>
-          <button class="btn-sm primary" data-action="pay-recurring" data-id="${it.r.id}">確認記帳</button>
-        </span>` : ""}
-      </div>`;
+        <span class="btn-sm ${due ? "primary" : ""}">${due ? "確認繳費" : "查看"} ›</span>
+      </button>`;
     }
     const urgent = it.days <= 3;
     const label = it.days < 0 ? "已逾期" : it.days === 0 ? "今天截止" : `${it.days} 天後截止`;
@@ -621,7 +618,7 @@ function viewPlan() {
         : s.state === "due" ? `<span class="pill pill-due">已到期</span>`
         : s.state === "soon" ? `<span class="pill pill-soon">${s.label}</span>`
         : `<span class="pill">${md(s.dueStr)}</span>`;
-      return `<button class="row" data-action="edit-recurring" data-id="${r.id}">
+      return `<button class="row" data-action="open-recurring" data-id="${r.id}">
         <span class="badge" style="background:${CAT_COLORS[r.category] || "#b9b2a3"}">${icon("boss")}</span>
         <span class="row-main"><b>${esc(r.name)} ${pill}</b><small>每月 ${r.day} 號 ${esc(r.time)} · ${esc(accountName(r.accountId))} · ${esc(r.category)}</small></span>
         <span class="amt num expense">${money(r.amount)}</span>
@@ -1237,24 +1234,89 @@ function openDeposit(w) {
 }
 
 // ========== 7. 動作 ==========
-function payRecurring(id) {
-  const r = recurring.find(x => x.id === id);
+// 固定支出詳細頁：看本月狀態、確認有沒有繳費、選擇繳費帳戶
+function openRecurringPay(r) {
   if (!r) return;
   const s = recurringStatus(r);
-  transactions.push({ id: uid(), type: "expense", amount: r.amount, accountId: r.accountId, category: r.category, date: s.dueStr, note: r.name });
-  r.lastHandled = s.key;
-  persist();
-  render();
-  toast(`已記下 ${r.name} ${money(r.amount)}`);
-}
+  const [yy, mm] = s.key.split("-").map(Number);
+  const monthText = `${yy} 年 ${mm} 月`;
+  const paidTx = r.lastHandled === s.key && r.lastTxId ? transactions.find(t => t.id === r.lastTxId) : null;
+  const statusPill = s.state === "done" ? `<span class="pill pill-done">${paidTx ? "已繳費" : "已略過"}</span>`
+    : s.state === "due" ? `<span class="pill pill-due">已到期</span>`
+    : `<span class="pill pill-soon">${s.label || md(s.dueStr)}</span>`;
+  const head = `<div class="card inset">
+      <div class="kv"><b>${monthText}</b>${statusPill}</div>
+      <div class="kv"><span class="muted">繳費期限</span><span>${mdw(s.dueStr)} ${esc(r.time)}</span></div>
+      <div class="kv"><span class="muted">每月金額</span><b class="num">${money(r.amount)}</b></div>
+      <div class="kv"><span class="muted">預設扣款帳戶</span><span>${esc(accountName(r.accountId))}</span></div>
+      <div class="kv"><span class="muted">分類</span><span>${esc(r.category)}</span></div>
+    </div>`;
 
-function skipRecurring(id) {
-  const r = recurring.find(x => x.id === id);
-  if (!r) return;
-  r.lastHandled = recurringStatus(r).key;
-  persist();
-  render();
-  toast("本月已略過");
+  if (s.state === "done") {
+    openSheet(r.name, `<div class="stack">
+      ${head}
+      <p class="small">${paidTx
+        ? `本月已繳費：${mdw(paidTx.date)} 從 ${esc(accountName(paidTx.accountId))} 付了 ${money(paidTx.amount)}。`
+        : "本月已經略過，沒有記帳。"}</p>
+      <p class="small muted">記錯了的話，可以撤銷，撤銷後會回到「待繳」狀態${paidTx ? "，並刪除那筆繳費紀錄" : ""}。</p>
+      <div class="form-actions">
+        <button type="button" class="btn-secondary" id="r-edit">編輯設定</button>
+        <button type="button" class="btn-danger" id="r-undo">撤銷</button>
+      </div>
+      <button type="button" class="btn-primary" data-action="close-sheet">關閉</button>
+    </div>`);
+    $("r-undo").onclick = () => {
+      if (paidTx) transactions = transactions.filter(t => t.id !== paidTx.id);
+      r.lastHandled = null;
+      r.lastTxId = null;
+      afterChange(paidTx ? "已撤銷這次繳費，並刪除那筆紀錄" : "已撤銷略過");
+    };
+    $("r-edit").onclick = () => openRecurringForm(r);
+    return;
+  }
+
+  openSheet(r.name, `<form id="pay-form" novalidate>
+    ${head}
+    <p class="small"><b>這個月繳了嗎？</b>確認已經繳費後，按「已繳費」會記成一筆支出。</p>
+    <div class="form-row">
+      ${field("這次繳費金額", `<input id="f-amount" type="number" inputmode="decimal" min="1" step="any" value="${r.amount}">`)}
+      ${field("繳費日期", `<input id="f-date" type="date" value="${todayStr()}">`)}
+    </div>
+    ${field("用哪個帳戶繳", accountSelect("f-acc", [...banks(), ...cards()], r.accountId))}
+    <label class="check-opt"><input type="checkbox" id="f-remember"> 以後都用這個帳戶繳</label>
+    ${formActions(false, "已繳費")}
+    <div class="form-actions">
+      <button type="button" class="btn-secondary" id="r-skip">本月不用繳（略過）</button>
+      <button type="button" class="btn-secondary" id="r-edit">編輯設定</button>
+    </div>
+  </form>`);
+
+  // 選的帳戶和預設不同時，才需要「以後都用這個帳戶」
+  const remember = $("f-remember").closest("label");
+  const syncRemember = () => { remember.hidden = Number($("f-acc").value) === r.accountId; };
+  $("f-acc").onchange = syncRemember;
+  syncRemember();
+
+  $("r-skip").onclick = () => {
+    r.lastHandled = s.key;
+    r.lastTxId = null;
+    afterChange(`${monthText}的${r.name}已略過`);
+  };
+  $("r-edit").onclick = () => openRecurringForm(r);
+
+  bindSave("pay-form", () => {
+    const amount = Math.round(Number($("f-amount").value) * 100) / 100;
+    if (!(amount > 0)) return showErr("請輸入大於 0 的金額。");
+    const date = $("f-date").value;
+    if (!date) return showErr("請選擇繳費日期。");
+    const accountId = Number($("f-acc").value);
+    const tx = { id: uid(), type: "expense", amount, accountId, category: r.category, date, note: r.name };
+    transactions.push(tx);
+    r.lastHandled = s.key;
+    r.lastTxId = tx.id;
+    if ($("f-remember").checked && !remember.hidden) r.accountId = accountId;
+    afterChange(`已記下 ${r.name} ${money(amount)}（${accountName(accountId)}）`);
+  });
 }
 
 function payCard(id) {
@@ -1565,6 +1627,8 @@ function openCheckDetail(c) {
 let quotes = load("bookkeeping-quotes", {});
 const quoteState = { busy: false, error: "", at: load("bookkeeping-quotes-at", 0) };
 const STOCK_ALERT_KEY = "bookkeeping-stock-alerted";
+const STOCK_COLORS = ["#ffcf3f", "#ff7a59", "#ff9ec4", "#9b7bd8", "#5b8def", "#4cbf8f", "#fffdf6"];
+const STOCK_COLOR_NAMES = ["黃色（預設）", "橘紅", "粉紅", "紫色", "藍色", "綠色", "白色"];
 
 function priceText(n) {
   return Number(n).toLocaleString("zh-TW", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
@@ -1584,8 +1648,16 @@ function marketOpen() {
   return day >= 1 && day <= 5 && hm >= 9 * 60 && hm <= 13 * 60 + 35;
 }
 
-function stocksAtTarget() {
-  return stocks.filter(st => st.target > 0 && quotes[st.code] && quotes[st.code].price <= st.target);
+// 到價提醒：買入價（跌到以下）、賣出價（漲到以上）
+function stockAlerts() {
+  const out = [];
+  for (const st of stocks) {
+    const q = quotes[st.code];
+    if (!q) continue;
+    if (st.target > 0 && q.price <= st.target) out.push({ st, q, kind: "buy", price: st.target });
+    if (st.sellTarget > 0 && q.price >= st.sellTarget) out.push({ st, q, kind: "sell", price: st.sellTarget });
+  }
+  return out;
 }
 
 // 台股習慣：漲是紅色、跌是綠色
@@ -1632,15 +1704,16 @@ async function fetchQuotes(force) {
 function notifyTargets() {
   const alerted = load(STOCK_ALERT_KEY, {});
   const today = todayStr();
-  const fresh = stocksAtTarget().filter(st => alerted[st.code + ":" + st.target] !== today);
+  const keyOf = a => `${a.st.code}:${a.kind}:${a.price}`;
+  const fresh = stockAlerts().filter(a => alerted[keyOf(a)] !== today);
   if (!fresh.length) return;
-  for (const st of fresh) alerted[st.code + ":" + st.target] = today;
+  for (const a of fresh) alerted[keyOf(a)] = today;
   save(STOCK_ALERT_KEY, alerted);
-  const names = fresh.map(st => `${st.code} ${st.name}`).join("、");
-  toast(`${names} 到目標價了`);
+  const line = a => `${a.st.code} ${a.st.name} ${a.kind === "buy" ? "到買入價" : "到賣出價"}`;
+  toast(fresh.map(line).join("、"));
   try {
     if ("Notification" in window && Notification.permission === "granted") {
-      new Notification("股票到目標價了", { body: fresh.map(st => `${st.code} ${st.name} 現價 ${priceText(quotes[st.code].price)}，目標 ${priceText(st.target)}`).join("\n") });
+      new Notification("股票到價提醒", { body: fresh.map(a => `${line(a)}：現價 ${priceText(a.q.price)}，設定 ${priceText(a.price)}`).join("\n") });
     }
   } catch (e) { /* 不支援通知 */ }
 }
@@ -1648,6 +1721,7 @@ function notifyTargets() {
 function viewStocks() {
   const list = [...stocks].sort((a, b) => a.code.localeCompare(b.code));
   let mv = 0, cost = 0, day = 0, held = 0;
+  const totalCost = list.reduce((sum, st) => sum + (st.shares || 0) * (st.cost || 0), 0);   // 總付出成本
   for (const st of list) {
     const q = quotes[st.code];
     if (!st.shares || !q) continue;
@@ -1666,6 +1740,7 @@ function viewStocks() {
     <div class="sec-head"><h2>我的持股</h2><button class="btn-sm" data-action="refresh-quotes" ${quoteState.busy ? "disabled" : ""}>${quoteState.busy ? "更新中…" : "更新股價"}</button></div>
     <div class="stock-total"><small>總市值</small><b class="num">${money(mv)}</b></div>
     <div class="duo">
+      <div><small>總成本</small><b class="num">${money(totalCost)}</b></div>
       <div><small>未實現損益</small><b class="num ${signCls(pl)}">${signed(pl)}</b>${cost > 0 ? `<small class="num ${signCls(pl)}">${pl >= 0 ? "+" : "−"}${Math.abs(plPct).toFixed(2)}%</small>` : ""}</div>
       <div><small>今日漲跌</small><b class="num ${signCls(day)}">${signed(day)}</b></div>
     </div>
@@ -1684,19 +1759,26 @@ function viewStocks() {
   h += `<div class="stack">${list.map(st => {
     const q = quotes[st.code];
     const ch = changeText(q);
-    const hit = st.target > 0 && q && q.price <= st.target;
+    const buyHit = st.target > 0 && q && q.price <= st.target;
+    const sellHit = st.sellTarget > 0 && q && q.price >= st.sellTarget;
+    const hit = buyHit || sellHit;
     const value = q && st.shares ? st.shares * q.price : 0;
     const gain = q && st.shares ? value - st.shares * (st.cost || 0) : 0;
     const gainPct = st.cost > 0 && q ? (q.price - st.cost) / st.cost * 100 : 0;
     let targetLine = "";
     if (st.target > 0) {
-      targetLine = hit
-        ? `<p class="small"><span class="pill pill-done">到目標價了</span> 現價已在目標 ${priceText(st.target)} 以下</p>`
-        : `<p class="small muted">目標買入價 ${priceText(st.target)} 以下${q ? ` · 還要再跌 ${((q.price - st.target) / q.price * 100).toFixed(1)}%` : ""}</p>`;
+      targetLine += buyHit
+        ? `<p class="small"><span class="pill pill-done">到買入價了</span> 現價已在 ${priceText(st.target)} 以下</p>`
+        : `<p class="small muted">買入價 ${priceText(st.target)} 以下${q ? ` · 還要跌 ${((q.price - st.target) / q.price * 100).toFixed(1)}%` : ""}</p>`;
+    }
+    if (st.sellTarget > 0) {
+      targetLine += sellHit
+        ? `<p class="small"><span class="pill pill-due">到賣出價了</span> 現價已在 ${priceText(st.sellTarget)} 以上</p>`
+        : `<p class="small muted">賣出價 ${priceText(st.sellTarget)} 以上${q ? ` · 還要漲 ${((st.sellTarget - q.price) / q.price * 100).toFixed(1)}%` : ""}</p>`;
     }
     return `<div class="card stock-card ${hit ? "is-hit" : ""}">
       <button class="cc-top" data-action="edit-stock" data-id="${st.id}">
-        <span class="code-badge num">${esc(st.code)}</span>
+        <span class="code-badge num" style="background:${st.color || STOCK_COLORS[0]}">${esc(st.code)}</span>
         <span class="row-main"><b>${esc(st.name && st.name !== st.code ? st.name : (q?.name || st.code))}</b><small>${esc(q?.market || "台股")}${q?.time ? " · " + esc(q.time) : ""}${st.note ? " · " + esc(st.note) : ""}</small></span>
         <span class="row-end"><b class="num stock-price">${q ? priceText(q.price) : "—"}</b><small class="num ${ch.cls}">${ch.text}</small></span>
       </button>
@@ -1712,7 +1794,8 @@ function viewStocks() {
 }
 
 function openStockForm(st) {
-  const x = st || { code: "", name: "", shares: "", cost: "", target: "", note: "" };
+  const x = st || { code: "", name: "", shares: "", cost: "", target: "", sellTarget: "", note: "", color: STOCK_COLORS[0] };
+  let color = x.color || STOCK_COLORS[0];
   let notFound = "";   // 查不到的代號；按第二次儲存仍可加入
   openSheet(st ? "編輯股票" : "新增股票", `<form id="stock-form" novalidate>
     <div class="form-row">
@@ -1725,10 +1808,23 @@ function openStockForm(st) {
       ${field("持有股數（1 張 = 1000 股）", `<input id="f-shares" type="number" inputmode="numeric" min="0" step="1" value="${x.shares}" placeholder="0 = 只觀察">`)}
       ${field("平均成本（每股）", `<input id="f-cost" type="number" inputmode="decimal" min="0" step="any" value="${x.cost}" placeholder="例如 850">`)}
     </div>
-    ${field("目標買入價（跌到這個價格以下時提醒你）", `<input id="f-target" type="number" inputmode="decimal" min="0" step="any" value="${x.target}" placeholder="不需要提醒就留空">`)}
+    <div class="form-row">
+      ${field("買入價提醒（跌到以下）", `<input id="f-target" type="number" inputmode="decimal" min="0" step="any" value="${x.target || ""}" placeholder="不需要就留空">`)}
+      ${field("賣出價提醒（漲到以上）", `<input id="f-sell" type="number" inputmode="decimal" min="0" step="any" value="${x.sellTarget || ""}" placeholder="不需要就留空">`)}
+    </div>
+    <div class="field"><span>代號顏色（標記關注股）</span><div class="swatches">
+      ${STOCK_COLORS.map((c, i) => `<button type="button" class="swatch" data-color="${c}" style="background:${c}" aria-pressed="${c === color}" aria-label="${STOCK_COLOR_NAMES[i]}"></button>`).join("")}
+    </div></div>
     ${field("備註", `<input id="f-note" value="${esc(x.note)}" placeholder="例如：長期存股" maxlength="30">`)}
     ${formActions(!!st)}
   </form>`);
+
+  document.querySelectorAll("#stock-form .swatch").forEach(b => {
+    b.onclick = () => {
+      color = b.dataset.color;
+      document.querySelectorAll("#stock-form .swatch").forEach(y => y.setAttribute("aria-pressed", y === b));
+    };
+  });
 
   $("f-lookup").onclick = async () => {
     const code = $("f-code").value.trim().toUpperCase();
@@ -1774,9 +1870,11 @@ function openStockForm(st) {
     const shares = Number($("f-shares").value) || 0;
     const cost = Number($("f-cost").value) || 0;
     const target = Number($("f-target").value) || 0;
-    if (shares < 0 || cost < 0 || target < 0) return showErr("數字不能是負的。");
+    const sellTarget = Number($("f-sell").value) || 0;
+    if (shares < 0 || cost < 0 || target < 0 || sellTarget < 0) return showErr("數字不能是負的。");
+    if (target > 0 && sellTarget > 0 && sellTarget <= target) return showErr("賣出價要比買入價高。");
     if (shares > 0 && !cost) return showErr("有持股的話，請填平均成本，才能算損益。");
-    const data = { code, name: $("f-name").value.trim() || quotes[code]?.name || code, shares, cost, target, note: $("f-note").value.trim() };
+    const data = { code, name: $("f-name").value.trim() || quotes[code]?.name || code, shares, cost, target, sellTarget, color, note: $("f-note").value.trim() };
     if (st) Object.assign(st, data);
     else stocks.push(Object.assign({ id: uid() }, data));
     afterChange(st ? "已更新" : "已加入股票清單");
@@ -2242,8 +2340,7 @@ document.addEventListener("click", e => {
 
     case "add-recurring": openRecurringForm(null); break;
     case "edit-recurring": openRecurringForm(recurring.find(r => r.id === id)); break;
-    case "pay-recurring": payRecurring(id); break;
-    case "skip-recurring": skipRecurring(id); break;
+    case "open-recurring": openRecurringPay(recurring.find(r => r.id === id)); break;
     case "enable-notify": enableNotify(); break;
 
     case "add-wish": openWishForm(null); break;
