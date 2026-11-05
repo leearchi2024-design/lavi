@@ -442,3 +442,28 @@ input, select {
 .duo small { color: var(--muted); font-size: 12px; font-weight: 700; }
 .duo b { font-size: 16px; }
 .stock-card .trio b { white-space: normal; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.35; }
+
+/* ---------- 18. 資金確認日期 ---------- */
+.day-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.day-btn {
+  aspect-ratio: 1; max-width: 100%; border-radius: 50%;
+  border: 2px solid var(--ink); background: var(--paper); color: var(--ink);
+  font: inherit; font-family: var(--mono); font-size: 14px; font-weight: 700; cursor: pointer;
+}
+.day-btn[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+
+/* ---------- 19. 股票交易與提醒 ---------- */
+.seg.seg-2 { grid-template-columns: 1fr 1fr; }
+.alert-list { display: flex; flex-direction: column; gap: 8px; }
+.alert-row { display: grid; grid-template-columns: 1fr 110px 36px; gap: 8px; align-items: center; }
+.alert-list:empty { display: none; }
+#f-add-alert { align-self: flex-start; margin-top: 2px; }
+.stock-actions { display: flex; gap: 8px; }
+.stock-actions .btn-sm:disabled { opacity: 0.35; cursor: default; }
+.list.list-inset { border-width: 2px; border-radius: 16px; }
+.list.list-inset .badge { width: 36px; height: 36px; padding: 4px; }
+.init-box { border: 2px dashed var(--ink); border-radius: 16px; padding: 10px 12px; }
+.init-box summary { cursor: pointer; font-size: 13px; font-weight: 700; }
+.init-box[open] summary { margin-bottom: 10px; }
+.init-box .form-row { margin-bottom: 8px; }
+input[readonly] { background: var(--soft); }

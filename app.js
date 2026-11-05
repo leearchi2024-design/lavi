@@ -17,7 +17,8 @@ const KEYS = {
   wishlist: "bookkeeping-wishlist",
   plan: "bookkeeping-allocation",
   checks: "bookkeeping-checks",
-  stocks: "bookkeeping-stocks"
+  stocks: "bookkeeping-stocks",
+  settings: "bookkeeping-settings"
 };
 
 const CATEGORIES = {
@@ -147,6 +148,9 @@ let wishlist = load(KEYS.wishlist, []);
 let plan = load(KEYS.plan, []);
 let checks = load(KEYS.checks, []);   // 資金確認紀錄
 let stocks = load(KEYS.stocks, []);   // 股票
+// App 設定：資金確認日、交割帳戶、手續費折扣（會跟著雲端同步）
+const DEFAULT_SETTINGS = { checkDays: [5, 17], stockAccountId: null, feeDiscount: 1 };
+let appSettings = Object.assign({}, DEFAULT_SETTINGS, load(KEYS.settings, {}));
 
 function persist() {
   save(KEYS.accounts, accounts);
@@ -156,6 +160,7 @@ function persist() {
   save(KEYS.plan, plan);
   save(KEYS.checks, checks);
   save(KEYS.stocks, stocks);
+  save(KEYS.settings, appSettings);
   markDirty();      // 記下哪些資料要上傳到雲端
   scheduleSync();   // 資料有變動 → 稍後自動同步到 Google 試算表
 }
@@ -167,7 +172,8 @@ const ui = {
   month: todayStr().slice(0, 7),       // 明細的月份
   reportMonth: todayStr().slice(0, 7), // 報表的月份
   filterType: "all",
-  filterAccount: "all"
+  filterAccount: "all",
+  stockReorder: false
 };
 
 // ========== 3. 工具 ==========
@@ -230,6 +236,7 @@ function effectOn(account, t) {
     if (t.accountId === account.id) v -= t.amount;
     if (t.toAccountId === account.id) v += t.amount;
   }
+  if (t.type === "trade" && t.accountId === account.id) v += t.side === "buy" ? -t.amount : t.amount;   // 買股票扣款、賣股票入帳
   return v;
 }
 
@@ -343,6 +350,16 @@ function render() {
 
 // 一筆紀錄的樣子
 function txRow(t) {
+  if (t.type === "trade") {
+    const buy = t.side === "buy";
+    const st = stocks.find(x => x.id === t.stockId);
+    return `<button class="row" data-action="edit-tx" data-id="${t.id}">
+      <span class="badge" style="background:${(st && st.color) || STOCK_COLORS[0]}">${icon("chart")}</span>
+      <span class="row-main"><b>${buy ? "買進" : "賣出"} ${esc(t.code)} ${esc(t.name || "")}</b>
+        <small>${sharesText(t.shares)} @ ${priceText(t.price)}${t.time ? " · " + esc(t.time) : ""} · ${t.accountId ? esc(accountName(t.accountId)) : "未連動帳戶"}${t.note ? " · " + esc(t.note) : ""}</small></span>
+      <span class="amt num transfer">${buy ? "−" : "+"}${money(t.amount)}</span>
+    </button>`;
+  }
   const isIn = t.type === "income";
   const isTr = t.type === "transfer";
   const title = isTr ? (t.alloc ? "資金分配" : "轉帳") : t.category;
@@ -394,6 +411,7 @@ function viewHome() {
       <span class="label">淨資產</span>
       <b class="hero-amt num">${money(net)}</b>
       <span class="hero-sub">銀行存款 ${money(bankTotal)} · 信用卡待繳 ${money(cardOwed)}</span>
+      ${stockValue() > 0 ? `<span class="hero-sub">股票市值 ${money(stockValue())}（另計，不含在淨資產）</span>` : ""}
     </div>
     <p class="hero-tip">每記一筆帳 +10 exp，資金確認 +20 exp，存錢筒買到 +50 exp</p>
   </section>`;
@@ -518,7 +536,7 @@ function viewRecords() {
     (accFilter === null || t.accountId === accFilter || t.toAccountId === accFilter)
   ));
 
-  const typeOptions = [["all", "全部類型"], ["expense", "支出"], ["income", "收入"], ["transfer", "轉帳"]]
+  const typeOptions = [["all", "全部類型"], ["expense", "支出"], ["income", "收入"], ["transfer", "轉帳"], ["trade", "股票買賣"]]
     .map(([v, l]) => `<option value="${v}" ${ui.filterType === v ? "selected" : ""}>${l}</option>`).join("");
   const accOptions = accounts
     .map(a => `<option value="${a.id}" ${String(ui.filterAccount) === String(a.id) ? "selected" : ""}>${esc(a.bank)}</option>`).join("");
@@ -1031,6 +1049,7 @@ function openAccountForm(acc, kind) {
       if (wishlist.some(w => !w.bought && w.accountId === acc.id)) return showErr("有存錢筒綁定這個帳戶，請先修改存錢筒。");
       accounts = accounts.filter(x => x.id !== acc.id);
       plan = plan.filter(p => p.accountId !== acc.id);
+      if (appSettings.stockAccountId === acc.id) appSettings.stockAccountId = null;
       afterChange("已刪除");
     });
   }
@@ -1358,11 +1377,13 @@ function download(filename, text, type) {
 
 function exportCsv() {
   if (!transactions.length) return toast("還沒有紀錄可以匯出");
-  const typeName = { expense: "支出", income: "收入", transfer: "轉帳" };
+  const typeName = { expense: "支出", income: "收入", transfer: "轉帳", trade: "股票" };
   const head = ["日期", "類型", "分類", "金額", "帳戶", "轉入帳戶", "備註"];
   const rows = sortedTx(transactions).reverse().map(t => [
-    t.date, typeName[t.type], t.category || "", t.amount, accountName(t.accountId),
-    t.toAccountId ? accountName(t.toAccountId) : "", t.note || ""
+    t.date, t.type === "trade" ? (t.side === "buy" ? "股票買進" : "股票賣出") : typeName[t.type],
+    t.type === "trade" ? `${t.code} ${t.name || ""}` : (t.category || ""), t.amount,
+    t.accountId ? accountName(t.accountId) : "", t.toAccountId ? accountName(t.toAccountId) : "",
+    t.type === "trade" ? `${t.shares} 股 @ ${t.price}${t.note ? "，" + t.note : ""}` : (t.note || "")
   ]);
   const csv = [head, ...rows].map(r => r.map(v => {
     const s = String(v);
@@ -1373,7 +1394,7 @@ function exportCsv() {
 }
 
 function backup() {
-  const data = { app: "bookkeeping", version: 2, exportedAt: new Date().toISOString(), accounts, transactions, recurring, wishlist, plan, checks, stocks };
+  const data = { app: "bookkeeping", version: 2, exportedAt: new Date().toISOString(), accounts, transactions, recurring, wishlist, plan, checks, stocks, settings: appSettings };
   download(`記帳備份-${todayStr()}.json`, JSON.stringify(data, null, 2), "application/json");
 }
 
@@ -1397,6 +1418,7 @@ function restoreFrom(file) {
     plan = d.plan || [];
     checks = d.checks || [];
     stocks = d.stocks || [];
+    appSettings = Object.assign({}, DEFAULT_SETTINGS, d.settings || {});
     persist();
     render();
     toast("已還原備份");
@@ -1415,6 +1437,7 @@ async function clearAll() {
   plan = [];
   checks = [];
   stocks = [];
+  appSettings = Object.assign({}, DEFAULT_SETTINGS);
   persist();
   render();
   toast("已清除全部資料");
@@ -1454,25 +1477,67 @@ function checkReminders(isStartup) {
   }
 }
 
-// ========== 7-1. 資金確認（每月 5 號、17 號對帳） ==========
-const CHECK_DAYS = [5, 17];
+// ========== 7-1. 資金確認（每月自訂日期對帳） ==========
+function checkDays() {
+  const days = (appSettings.checkDays || []).map(Number).filter(d => d >= 1 && d <= 31);
+  return days.length ? [...new Set(days)].sort((a, b) => a - b) : [5, 17];
+}
 
-// 目前這一期的確認日：今天以前最近的 5 號或 17 號
+// 某個月的確認日（沒有 31 號的月份算月底）
+function checkDatesIn(y, m) {
+  const last = new Date(y, m + 1, 0).getDate();
+  return [...new Set(checkDays().map(d => Math.min(d, last)))].map(d => toStr(new Date(y, m, d)));
+}
+
+// 目前這一期的確認日：今天以前最近的一個確認日
 function checkPeriod(dateStr = todayStr()) {
   const d = parseDate(dateStr);
-  const y = d.getFullYear(), m = d.getMonth(), day = d.getDate();
-  if (day >= CHECK_DAYS[1]) return toStr(new Date(y, m, CHECK_DAYS[1]));
-  if (day >= CHECK_DAYS[0]) return toStr(new Date(y, m, CHECK_DAYS[0]));
-  return toStr(new Date(y, m - 1, CHECK_DAYS[1]));
+  const past = checkDatesIn(d.getFullYear(), d.getMonth()).filter(x => x <= dateStr);
+  if (past.length) return past[past.length - 1];
+  const pm = new Date(d.getFullYear(), d.getMonth() - 1, 1);   // 上個月
+  const prev = checkDatesIn(pm.getFullYear(), pm.getMonth());
+  return prev[prev.length - 1];
 }
 
 // 下一次確認日
 function nextCheckDate(dateStr = todayStr()) {
   const d = parseDate(dateStr);
-  const y = d.getFullYear(), m = d.getMonth(), day = d.getDate();
-  if (day < CHECK_DAYS[0]) return toStr(new Date(y, m, CHECK_DAYS[0]));
-  if (day < CHECK_DAYS[1]) return toStr(new Date(y, m, CHECK_DAYS[1]));
-  return toStr(new Date(y, m + 1, CHECK_DAYS[0]));
+  const next = checkDatesIn(d.getFullYear(), d.getMonth()).filter(x => x > dateStr);
+  if (next.length) return next[0];
+  const nm = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+  return checkDatesIn(nm.getFullYear(), nm.getMonth())[0];
+}
+
+function checkDaysText() { return "每月 " + checkDays().join("、") + " 號"; }
+
+function openCheckDays() {
+  let picked = new Set(checkDays());
+  openSheet("資金確認日期", `<form id="days-form" novalidate>
+    <p class="small muted">選擇每個月要對帳的日子，可以選好幾天。選 29、30、31 號的話，沒有那一天的月份會在月底提醒。</p>
+    <div class="day-grid">
+      ${Array.from({ length: 31 }, (_, i) => i + 1).map(d => `<button type="button" class="day-btn" data-day="${d}" aria-pressed="${picked.has(d)}">${d}</button>`).join("")}
+    </div>
+    <p class="small" id="days-summary"></p>
+    ${formActions(false)}
+  </form>`);
+  const summary = () => {
+    const list = [...picked].sort((a, b) => a - b);
+    $("days-summary").textContent = list.length ? `每月 ${list.join("、")} 號，一個月確認 ${list.length} 次` : "至少要選一天";
+  };
+  document.querySelectorAll("#days-form .day-btn").forEach(b => {
+    b.onclick = () => {
+      const d = Number(b.dataset.day);
+      if (picked.has(d)) picked.delete(d); else picked.add(d);
+      b.setAttribute("aria-pressed", picked.has(d));
+      summary();
+    };
+  });
+  summary();
+  bindSave("days-form", () => {
+    if (!picked.size) return showErr("至少要選一天。");
+    appSettings.checkDays = [...picked].sort((a, b) => a - b);
+    afterChange(`資金確認改成${checkDaysText()}`);
+  });
 }
 
 function checkDone(period) { return checks.some(c => c.period === period); }
@@ -1496,7 +1561,7 @@ function viewChecks() {
   const history = [...checks].sort((a, b) => b.date !== a.date ? b.date.localeCompare(a.date) : b.id - a.id).slice(0, 6);
 
   let h = `<section>
-    <div class="sec-head"><h2>資金確認 <small>每月 5 號、17 號</small></h2></div>
+    <div class="sec-head"><h2>資金確認 <small>${checkDaysText()}</small></h2><button class="link" data-action="check-days">設定日期</button></div>
     <div class="card">`;
   if (!accounts.length) {
     h += `<p class="small muted">新增帳戶後，每月 5 號和 17 號會提醒你對照銀行 App，確認各帳戶的實際餘額。</p>`;
@@ -1648,17 +1713,6 @@ function marketOpen() {
   return day >= 1 && day <= 5 && hm >= 9 * 60 && hm <= 13 * 60 + 35;
 }
 
-// 到價提醒：買入價（跌到以下）、賣出價（漲到以上）
-function stockAlerts() {
-  const out = [];
-  for (const st of stocks) {
-    const q = quotes[st.code];
-    if (!q) continue;
-    if (st.target > 0 && q.price <= st.target) out.push({ st, q, kind: "buy", price: st.target });
-    if (st.sellTarget > 0 && q.price >= st.sellTarget) out.push({ st, q, kind: "sell", price: st.sellTarget });
-  }
-  return out;
-}
 
 // 台股習慣：漲是紅色、跌是綠色
 function changeText(q) {
@@ -1718,17 +1772,83 @@ function notifyTargets() {
   } catch (e) { /* 不支援通知 */ }
 }
 
+// ---------- 持股計算：期初持股 + 每一筆買賣紀錄 ----------
+// 買賣紀錄存在記帳紀錄裡（type: "trade"），所以會影響帳戶餘額、出現在明細
+// 買進 amount = 實付（成交金額 + 手續費）；賣出 amount = 實收（成交金額 − 手續費 − 交易稅）
+function tradesOf(st) {
+  return transactions
+    .filter(t => t.type === "trade" && t.stockId === st.id)
+    .sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")) || a.id - b.id);
+}
+
+// 平均成本法：賣出時用當時的平均成本計算已實現損益
+function position(st, excludeId) {
+  let shares = Number(st.shares) || 0;
+  let cost = shares * (Number(st.cost) || 0);
+  let realized = 0;
+  for (const t of tradesOf(st)) {
+    if (t.id === excludeId) continue;
+    if (t.side === "buy") {
+      shares += t.shares;
+      cost += t.amount;
+    } else {
+      const avg = shares > 0 ? cost / shares : 0;
+      const out = Math.min(t.shares, shares);
+      cost -= avg * out;
+      shares -= out;
+      realized += t.amount - avg * out;
+    }
+  }
+  if (shares <= 0) { shares = 0; cost = 0; }
+  return { shares, cost, avg: shares ? cost / shares : 0, realized };
+}
+
+// 台股手續費 0.1425%（可打折，整張最低 20 元、零股最低 1 元）；交易稅：股票 0.3%、ETF 0.1%
+function tradeFee(gross, shares) {
+  if (!(gross > 0)) return 0;
+  const rate = 0.001425 * (Number(appSettings.feeDiscount) || 1);
+  return Math.max(shares >= 1000 ? 20 : 1, Math.floor(gross * rate));
+}
+function tradeTax(gross, code) {
+  if (!(gross > 0)) return 0;
+  return Math.floor(gross * (/^00/.test(code) ? 0.001 : 0.003));
+}
+
+function sortedStocks() {
+  return [...stocks].sort((a, b) => (a.order ?? 1e9) - (b.order ?? 1e9) || a.code.localeCompare(b.code));
+}
+
+function moveStock(id, dir) {
+  const list = sortedStocks();
+  list.forEach((s, i) => { s.order = i; });
+  const i = list.findIndex(s => s.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i].order, list[j].order] = [list[j].order, list[i].order];
+  persist();
+  render();
+}
+
+function stockAccount() {
+  const a = findAccount(appSettings.stockAccountId);
+  return a && a.kind !== "card" ? a : null;
+}
+
+// ---------- 股票分頁 ----------
 function viewStocks() {
-  const list = [...stocks].sort((a, b) => a.code.localeCompare(b.code));
-  let mv = 0, cost = 0, day = 0, held = 0;
-  const totalCost = list.reduce((sum, st) => sum + (st.shares || 0) * (st.cost || 0), 0);   // 總付出成本
+  const list = sortedStocks();
+  let mv = 0, cost = 0, day = 0, realized = 0, totalCost = 0;
+  const pos = {};
   for (const st of list) {
+    const p = position(st);
+    pos[st.id] = p;
+    realized += p.realized;
+    totalCost += p.cost;
     const q = quotes[st.code];
-    if (!st.shares || !q) continue;
-    held++;
-    mv += st.shares * q.price;
-    cost += st.shares * (st.cost || 0);
-    if (q.prev) day += st.shares * (q.price - q.prev);
+    if (!p.shares || !q) continue;
+    mv += p.shares * q.price;
+    cost += p.cost;
+    if (q.prev) day += p.shares * (q.price - q.prev);
   }
   const pl = mv - cost;
   const plPct = cost > 0 ? pl / cost * 100 : 0;
@@ -1736,86 +1856,231 @@ function viewStocks() {
   const signed = v => (v > 0 ? "+" : "") + money(v);
   const src = [...new Set(list.map(st => quotes[st.code]?.source).filter(Boolean))].join("、");
 
-  let h = `<section class="card">
+  let h = viewStockAccount();
+
+  h += `<section class="card">
     <div class="sec-head"><h2>我的持股</h2><button class="btn-sm" data-action="refresh-quotes" ${quoteState.busy ? "disabled" : ""}>${quoteState.busy ? "更新中…" : "更新股價"}</button></div>
     <div class="stock-total"><small>總市值</small><b class="num">${money(mv)}</b></div>
     <div class="duo">
       <div><small>總成本</small><b class="num">${money(totalCost)}</b></div>
       <div><small>未實現損益</small><b class="num ${signCls(pl)}">${signed(pl)}</b>${cost > 0 ? `<small class="num ${signCls(pl)}">${pl >= 0 ? "+" : "−"}${Math.abs(plPct).toFixed(2)}%</small>` : ""}</div>
       <div><small>今日漲跌</small><b class="num ${signCls(day)}">${signed(day)}</b></div>
+      <div><small>已實現損益</small><b class="num ${signCls(realized)}">${signed(realized)}</b></div>
     </div>
     ${quoteState.error ? `<p class="small expense">${esc(quoteState.error)}</p>` : ""}
     <p class="small muted">${quoteState.at ? "股價更新 " + timeText(new Date(quoteState.at).toISOString()) : "還沒查詢過股價"}${src ? " · " + esc(src) : ""} · ${marketOpen() ? "交易時間每 30 秒自動更新" : "目前非交易時間"}</p>
-    <p class="small muted">股票獨立管理，不會影響記帳本的帳戶餘額和淨資產。漲紅跌綠。</p>
+    <p class="small muted">股票的成本和市值另外計算，不算進淨資產。買賣時的付款、入帳會反映在帳戶餘額。漲紅跌綠。</p>
   </section>`;
 
   h += `<section>
-    <div class="sec-head"><h2>股票清單 <small>${list.length} 檔</small></h2><button class="link" data-action="add-stock">＋ 新增股票</button></div>`;
+    <div class="sec-head"><h2>股票清單 <small>${list.length} 檔</small></h2>
+      <span class="nav">
+        ${list.length > 1 ? `<button class="link" data-action="stock-reorder">${ui.stockReorder ? "完成" : "調整順序"}</button>` : ""}
+        <button class="link" data-action="add-stock">＋ 新增股票</button>
+      </span>
+    </div>`;
   if (!list.length) {
-    h += `<div class="empty">${icon("chart", "empty-ic")}<span>輸入股票代號，例如 2330、0050，就能追蹤即時股價。可以只當觀察清單，也可以記下持有股數和成本。</span></div>`;
+    h += `<div class="empty">${icon("chart", "empty-ic")}<span>輸入股票代號，例如 2330、0050，就能追蹤即時股價。新增後可以記錄每一筆買進、賣出。</span></div>`;
+    return h + `</section>`;
+  }
+
+  // 調整順序模式：只顯示名稱和上下移動按鈕
+  if (ui.stockReorder) {
+    h += `<p class="small muted">用 ▲▼ 調整前後順序，把要注意的股票排在前面。</p>
+      <div class="list">${list.map((st, i) => `<div class="row">
+        <span class="code-badge num" style="background:${st.color || STOCK_COLORS[0]}">${esc(st.code)}</span>
+        <span class="row-main"><b>${esc(stockName(st))}</b></span>
+        <span class="row-actions">
+          <button class="icon-btn" data-action="stock-up" data-id="${st.id}" aria-label="往前移" ${i === 0 ? "disabled" : ""}>▲</button>
+          <button class="icon-btn" data-action="stock-down" data-id="${st.id}" aria-label="往後移" ${i === list.length - 1 ? "disabled" : ""}>▼</button>
+        </span>
+      </div>`).join("")}</div>`;
     return h + `</section>`;
   }
 
   h += `<div class="stack">${list.map(st => {
     const q = quotes[st.code];
+    const p = pos[st.id];
     const ch = changeText(q);
-    const buyHit = st.target > 0 && q && q.price <= st.target;
-    const sellHit = st.sellTarget > 0 && q && q.price >= st.sellTarget;
-    const hit = buyHit || sellHit;
-    const value = q && st.shares ? st.shares * q.price : 0;
-    const gain = q && st.shares ? value - st.shares * (st.cost || 0) : 0;
-    const gainPct = st.cost > 0 && q ? (q.price - st.cost) / st.cost * 100 : 0;
-    let targetLine = "";
-    if (st.target > 0) {
-      targetLine += buyHit
-        ? `<p class="small"><span class="pill pill-done">到買入價了</span> 現價已在 ${priceText(st.target)} 以下</p>`
-        : `<p class="small muted">買入價 ${priceText(st.target)} 以下${q ? ` · 還要跌 ${((q.price - st.target) / q.price * 100).toFixed(1)}%` : ""}</p>`;
-    }
-    if (st.sellTarget > 0) {
-      targetLine += sellHit
-        ? `<p class="small"><span class="pill pill-due">到賣出價了</span> 現價已在 ${priceText(st.sellTarget)} 以上</p>`
-        : `<p class="small muted">賣出價 ${priceText(st.sellTarget)} 以上${q ? ` · 還要漲 ${((st.sellTarget - q.price) / q.price * 100).toFixed(1)}%` : ""}</p>`;
-    }
-    return `<div class="card stock-card ${hit ? "is-hit" : ""}">
+    const alerts = alertsOf(st);
+    const lines = alerts.map(a => {
+      const hit = q && (a.side === "buy" ? q.price <= a.price : q.price >= a.price);
+      if (hit) return `<p class="small"><span class="pill ${a.side === "buy" ? "pill-done" : "pill-due"}">${a.side === "buy" ? "到買入價了" : "到賣出價了"}</span> 現價已在 ${priceText(a.price)} ${a.side === "buy" ? "以下" : "以上"}</p>`;
+      const gap = q ? Math.abs(a.price - q.price) / q.price * 100 : null;
+      return `<p class="small muted">${a.side === "buy" ? "買入" : "賣出"}提醒 ${priceText(a.price)} ${a.side === "buy" ? "以下" : "以上"}${gap !== null ? ` · 還要${a.side === "buy" ? "跌" : "漲"} ${gap.toFixed(1)}%` : ""}</p>`;
+    }).join("");
+    const anyHit = alerts.some(a => q && (a.side === "buy" ? q.price <= a.price : q.price >= a.price));
+    const value = q && p.shares ? p.shares * q.price : 0;
+    const gain = q && p.shares ? value - p.cost : 0;
+    const gainPct = p.cost > 0 && q ? gain / p.cost * 100 : 0;
+    return `<div class="card stock-card ${anyHit ? "is-hit" : ""}">
       <button class="cc-top" data-action="edit-stock" data-id="${st.id}">
         <span class="code-badge num" style="background:${st.color || STOCK_COLORS[0]}">${esc(st.code)}</span>
-        <span class="row-main"><b>${esc(st.name && st.name !== st.code ? st.name : (q?.name || st.code))}</b><small>${esc(q?.market || "台股")}${q?.time ? " · " + esc(q.time) : ""}${st.note ? " · " + esc(st.note) : ""}</small></span>
+        <span class="row-main"><b>${esc(stockName(st))}</b><small>${esc(q?.market || "台股")}${q?.time ? " · " + esc(q.time) : ""}${st.note ? " · " + esc(st.note) : ""}</small></span>
         <span class="row-end"><b class="num stock-price">${q ? priceText(q.price) : "—"}</b><small class="num ${ch.cls}">${ch.text}</small></span>
       </button>
-      ${st.shares > 0 ? `<div class="trio">
-        <div><small>持有</small><b class="num">${sharesText(st.shares)}</b></div>
+      ${p.shares > 0 ? `<div class="trio">
+        <div><small>持有（均價 ${priceText(Math.round(p.avg * 100) / 100)}）</small><b class="num">${sharesText(p.shares)}</b></div>
         <div><small>市值</small><b class="num">${q ? money(value) : "—"}</b></div>
-        <div><small>損益（均價 ${priceText(st.cost || 0)}）</small><b class="num ${signCls(gain)}">${q ? signed(gain) : "—"}</b>${q && st.cost > 0 ? `<small class="num ${signCls(gain)}">${gainPct >= 0 ? "+" : "−"}${Math.abs(gainPct).toFixed(2)}%</small>` : ""}</div>
+        <div><small>未實現損益</small><b class="num ${signCls(gain)}">${q ? signed(gain) : "—"}</b>${q && p.cost > 0 ? `<small class="num ${signCls(gain)}">${gainPct >= 0 ? "+" : "−"}${Math.abs(gainPct).toFixed(2)}%</small>` : ""}</div>
       </div>` : ""}
-      ${targetLine}
+      ${Math.round(p.realized) !== 0 ? `<p class="small muted">已實現損益 <b class="num ${signCls(p.realized)}">${signed(p.realized)}</b></p>` : ""}
+      ${lines}
+      <div class="stock-actions">
+        <button class="btn-sm primary" data-action="trade-buy" data-id="${st.id}">＋ 買進</button>
+        <button class="btn-sm" data-action="trade-sell" data-id="${st.id}" ${p.shares > 0 ? "" : "disabled"}>－ 賣出</button>
+      </div>
     </div>`;
   }).join("")}</div>`;
   return h + `</section>`;
 }
 
+// 目前持股的總市值（給首頁參考用）
+function stockValue() {
+  return stocks.reduce((sum, st) => {
+    const q = quotes[st.code];
+    return q ? sum + position(st).shares * q.price : sum;
+  }, 0);
+}
+
+function stockName(st) {
+  const q = quotes[st.code];
+  return st.name && st.name !== st.code ? st.name : (q?.name || st.code);
+}
+
+// ---------- 交割帳戶 ----------
+function viewStockAccount() {
+  const acc = stockAccount();
+  if (!acc) {
+    return `<section class="card">
+      <div class="sec-head"><h2>交割帳戶</h2></div>
+      <p class="small muted">選一個銀行帳戶當作股票的交割帳戶。買進時從這裡扣款、賣出時存回這裡，也能在這裡看剩餘資金和轉帳紀錄。</p>
+      <button class="btn-primary" data-action="stock-account">${banks().length ? "選擇交割帳戶" : "先到「帳戶」新增銀行帳戶"}</button>
+    </section>`;
+  }
+  const recent = sortedTx(transactions.filter(t => t.accountId === acc.id || t.toAccountId === acc.id)).slice(0, 4);
+  const ym = todayStr().slice(0, 7);
+  const monthIn = transactions.filter(t => t.date.startsWith(ym)).reduce((s, t) => s + Math.max(0, effectOn(acc, t)), 0);
+  const monthOut = transactions.filter(t => t.date.startsWith(ym)).reduce((s, t) => s + Math.max(0, -effectOn(acc, t)), 0);
+  return `<section class="card">
+    <div class="sec-head"><h2>交割帳戶</h2><button class="link" data-action="stock-account">設定</button></div>
+    <div class="kv"><span><span class="dot" style="background:${acc.color}"></span><b>${esc(acc.bank)}</b>${acc.purpose ? ` <span class="tag">${esc(acc.purpose)}</span>` : ""}</span></div>
+    <div class="stock-total"><small>剩餘資金</small><b class="num ${balanceOf(acc) < 0 ? "expense" : ""}">${money(balanceOf(acc))}</b></div>
+    <div class="duo">
+      <div><small>本月存入</small><b class="num">${money(monthIn)}</b></div>
+      <div><small>本月扣款</small><b class="num">${money(monthOut)}</b></div>
+    </div>
+    <div class="btn-grid">
+      <button class="btn-secondary" data-action="stock-transfer-in">轉入資金</button>
+      <button class="btn-secondary" data-action="stock-transfer-out">轉出資金</button>
+    </div>
+    ${recent.length ? `<div class="list list-inset">${recent.map(txRow).join("")}</div>
+      <button class="link" data-action="stock-account-records">查看全部紀錄 ›</button>` : `<p class="small muted">這個帳戶還沒有紀錄。</p>`}
+  </section>`;
+}
+
+function openStockAccountForm() {
+  if (!banks().length) { ui.tab = "accounts"; render(); return toast("請先新增銀行帳戶"); }
+  const cur = stockAccount();
+  openSheet("交割帳戶設定", `<form id="sa-form" novalidate>
+    ${field("交割帳戶（買賣股票用的銀行帳戶）", accountSelect("f-acc", banks(), cur ? cur.id : banks()[0].id))}
+    ${field("券商手續費折扣（折）", `<input id="f-disc" type="number" inputmode="decimal" min="0.1" max="10" step="0.01" value="${Math.round((Number(appSettings.feeDiscount) || 1) * 1000) / 100}">`)}
+    <p class="small muted">手續費是成交金額的 0.1425%。券商給 2.8 折就填 2.8，沒有折扣填 10。記錄買賣時會自動算好，也可以每筆自己修改。</p>
+    ${formActions(false)}
+  </form>`);
+  bindSave("sa-form", () => {
+    const disc = Number($("f-disc").value);
+    if (!(disc > 0 && disc <= 10)) return showErr("折扣請填 0.1 到 10 之間，例如 2.8。");
+    appSettings.stockAccountId = Number($("f-acc").value);
+    appSettings.feeDiscount = Math.round(disc * 1000) / 10000;
+    afterChange("已更新交割帳戶設定");
+  });
+}
+
+function stockTransfer(dir) {
+  const acc = stockAccount();
+  if (!acc) return openStockAccountForm();
+  const other = banks().find(b => b.id !== acc.id);
+  if (dir === "in") openTxForm(null, { type: "transfer", accountId: other ? other.id : acc.id, toAccountId: acc.id, note: "轉入交割帳戶" });
+  else openTxForm(null, { type: "transfer", accountId: acc.id, toAccountId: other ? other.id : null, note: "從交割帳戶轉出" });
+}
+
+// ---------- 到價提醒（每檔可以有好幾個） ----------
+function alertsOf(st) {
+  if (Array.isArray(st.alerts)) return st.alerts.filter(a => a.price > 0);
+  const a = [];   // 舊版只有一個買入價、一個賣出價
+  if (st.target > 0) a.push({ id: "b", side: "buy", price: st.target });
+  if (st.sellTarget > 0) a.push({ id: "s", side: "sell", price: st.sellTarget });
+  return a;
+}
+
+function stockAlerts() {
+  const out = [];
+  for (const st of sortedStocks()) {
+    const q = quotes[st.code];
+    if (!q) continue;
+    for (const a of alertsOf(st)) {
+      if (a.side === "buy" ? q.price <= a.price : q.price >= a.price) out.push({ st, q, kind: a.side, price: a.price });
+    }
+  }
+  return out;
+}
+
+function alertRowHtml(a) {
+  return `<div class="alert-row">
+    <select class="al-side" aria-label="提醒種類">
+      <option value="buy" ${a.side === "buy" ? "selected" : ""}>買入：跌到以下</option>
+      <option value="sell" ${a.side === "sell" ? "selected" : ""}>賣出：漲到以上</option>
+    </select>
+    <input class="al-price" type="number" inputmode="decimal" min="0" step="any" value="${a.price || ""}" placeholder="價格" aria-label="提醒價格">
+    <button type="button" class="icon-btn al-del" aria-label="刪除這個提醒">✕</button>
+  </div>`;
+}
+
+// ---------- 新增／編輯股票 ----------
 function openStockForm(st) {
-  const x = st || { code: "", name: "", shares: "", cost: "", target: "", sellTarget: "", note: "", color: STOCK_COLORS[0] };
+  const x = st || { code: "", name: "", shares: "", cost: "", note: "", color: STOCK_COLORS[0] };
   let color = x.color || STOCK_COLORS[0];
   let notFound = "";   // 查不到的代號；按第二次儲存仍可加入
-  openSheet(st ? "編輯股票" : "新增股票", `<form id="stock-form" novalidate>
+  const trades = st ? tradesOf(st).reverse() : [];
+  const p = st ? position(st) : null;
+
+  openSheet(st ? `${st.code} ${stockName(st)}` : "新增股票", `<form id="stock-form" novalidate>
     <div class="form-row">
-      ${field("股票代號", `<input id="f-code" value="${esc(x.code)}" placeholder="例如 2330、0050" maxlength="6" autocomplete="off" spellcheck="false">`)}
+      ${field("股票代號", `<input id="f-code" value="${esc(x.code)}" placeholder="例如 2330、0050" maxlength="6" autocomplete="off" spellcheck="false" ${trades.length ? "readonly" : ""}>`)}
       ${field("名稱", `<input id="f-name" value="${esc(x.name)}" placeholder="查詢後自動帶入" maxlength="20">`)}
     </div>
     <button type="button" class="btn-secondary" id="f-lookup">查詢股價</button>
     <p class="small muted" id="f-quote">${st && quotes[st.code] ? `現價 ${priceText(quotes[st.code].price)}` : "輸入代號後按「查詢股價」，確認是哪一檔。"}</p>
-    <div class="form-row">
-      ${field("持有股數（1 張 = 1000 股）", `<input id="f-shares" type="number" inputmode="numeric" min="0" step="1" value="${x.shares}" placeholder="0 = 只觀察">`)}
-      ${field("平均成本（每股）", `<input id="f-cost" type="number" inputmode="decimal" min="0" step="any" value="${x.cost}" placeholder="例如 850">`)}
-    </div>
-    <div class="form-row">
-      ${field("買入價提醒（跌到以下）", `<input id="f-target" type="number" inputmode="decimal" min="0" step="any" value="${x.target || ""}" placeholder="不需要就留空">`)}
-      ${field("賣出價提醒（漲到以上）", `<input id="f-sell" type="number" inputmode="decimal" min="0" step="any" value="${x.sellTarget || ""}" placeholder="不需要就留空">`)}
-    </div>
+
     <div class="field"><span>代號顏色（標記關注股）</span><div class="swatches">
       ${STOCK_COLORS.map((c, i) => `<button type="button" class="swatch" data-color="${c}" style="background:${c}" aria-pressed="${c === color}" aria-label="${STOCK_COLOR_NAMES[i]}"></button>`).join("")}
     </div></div>
+
+    <div class="field"><span>到價提醒（可以設好幾個）</span>
+      <div id="alert-list" class="alert-list">${alertsOf(x).map(alertRowHtml).join("")}</div>
+      <button type="button" class="btn-sm" id="f-add-alert">＋ 新增提醒</button>
+    </div>
+
+    <details class="init-box" ${x.shares > 0 ? "open" : ""}>
+      <summary>期初持股（開始記帳前就有的）</summary>
+      <div class="form-row">
+        ${field("股數（1 張 = 1000 股）", `<input id="f-shares" type="number" inputmode="numeric" min="0" step="1" value="${x.shares || ""}" placeholder="沒有就留空">`)}
+        ${field("平均成本（每股）", `<input id="f-cost" type="number" inputmode="decimal" min="0" step="any" value="${x.cost || ""}" placeholder="例如 850">`)}
+      </div>
+      <p class="small muted">之後的買進、賣出請用股票卡片上的「買進」「賣出」記錄，會記下時間並連動帳戶。</p>
+    </details>
+
     ${field("備註", `<input id="f-note" value="${esc(x.note)}" placeholder="例如：長期存股" maxlength="30">`)}
+
+    ${st ? `<div class="field"><span>買賣紀錄${p ? ` · 目前持有 ${sharesText(p.shares)}` : ""}</span>
+      ${trades.length ? `<div class="list list-inset">${trades.map(txRow).join("")}</div>` : `<p class="small muted">還沒有買賣紀錄。</p>`}
+      <div class="btn-grid">
+        <button type="button" class="btn-secondary" data-action="trade-buy" data-id="${st.id}">＋ 買進</button>
+        <button type="button" class="btn-secondary" data-action="trade-sell" data-id="${st.id}" ${p && p.shares > 0 ? "" : "disabled"}>－ 賣出</button>
+      </div>
+    </div>` : ""}
+    ${st && trades.length ? `<p class="small muted">刪除這檔股票會一起刪除 ${trades.length} 筆買賣紀錄，帳戶餘額也會跟著還原。</p>` : ""}
     ${formActions(!!st)}
   </form>`);
 
@@ -1825,6 +2090,13 @@ function openStockForm(st) {
       document.querySelectorAll("#stock-form .swatch").forEach(y => y.setAttribute("aria-pressed", y === b));
     };
   });
+  const bindAlertRows = () => document.querySelectorAll("#alert-list .al-del").forEach(b => { b.onclick = () => b.closest(".alert-row").remove(); });
+  bindAlertRows();
+  $("f-add-alert").onclick = () => {
+    $("alert-list").insertAdjacentHTML("beforeend", alertRowHtml({ side: "buy", price: "" }));
+    bindAlertRows();
+    $("alert-list").lastElementChild.querySelector(".al-price").focus();
+  };
 
   $("f-lookup").onclick = async () => {
     const code = $("f-code").value.trim().toUpperCase();
@@ -1854,6 +2126,7 @@ function openStockForm(st) {
 
   if (st) {
     armDelete($("f-del"), () => {
+      transactions = transactions.filter(t => !(t.type === "trade" && t.stockId === st.id));
       stocks = stocks.filter(y => y.id !== st.id);
       afterChange("已刪除");
     });
@@ -1862,23 +2135,150 @@ function openStockForm(st) {
   bindSave("stock-form", () => {
     const code = $("f-code").value.trim().toUpperCase();
     if (!/^[0-9A-Z]{4,6}$/.test(code)) return showErr("股票代號是 4 到 6 碼的數字或英文，例如 2330、00878。");
-    if (!st && stocks.some(y => y.code === code)) return showErr(`${code} 已經在清單裡了，請直接點它來修改。`);
+    if (stocks.some(y => y.code === code && (!st || y.id !== st.id))) return showErr(`${code} 已經在清單裡了，請直接點它來修改。`);
     if (notFound === code) {
       notFound = "";
       return showErr(`查不到 ${code} 的股價。確定代號沒錯的話，再按一次「儲存」仍會加入。`);
     }
     const shares = Number($("f-shares").value) || 0;
     const cost = Number($("f-cost").value) || 0;
-    const target = Number($("f-target").value) || 0;
-    const sellTarget = Number($("f-sell").value) || 0;
-    if (shares < 0 || cost < 0 || target < 0 || sellTarget < 0) return showErr("數字不能是負的。");
-    if (target > 0 && sellTarget > 0 && sellTarget <= target) return showErr("賣出價要比買入價高。");
-    if (shares > 0 && !cost) return showErr("有持股的話，請填平均成本，才能算損益。");
-    const data = { code, name: $("f-name").value.trim() || quotes[code]?.name || code, shares, cost, target, sellTarget, color, note: $("f-note").value.trim() };
-    if (st) Object.assign(st, data);
-    else stocks.push(Object.assign({ id: uid() }, data));
+    if (shares < 0 || cost < 0) return showErr("數字不能是負的。");
+    if (shares > 0 && !cost) return showErr("有期初持股的話，請填平均成本，才能算損益。");
+
+    const alerts = [];
+    for (const row of document.querySelectorAll("#alert-list .alert-row")) {
+      const price = Number(row.querySelector(".al-price").value);
+      if (!row.querySelector(".al-price").value) continue;
+      if (!(price > 0)) return showErr("提醒價格要大於 0。");
+      alerts.push({ id: uid() + alerts.length, side: row.querySelector(".al-side").value, price });
+    }
+
+    const name = $("f-name").value.trim() || quotes[code]?.name || code;
+    const data = { code, name, shares, cost, color, alerts, note: $("f-note").value.trim() };
+    if (st) {
+      Object.assign(st, data);
+      delete st.target;
+      delete st.sellTarget;
+      for (const t of transactions) if (t.type === "trade" && t.stockId === st.id) t.name = name;
+    } else {
+      const maxOrder = stocks.reduce((m, y) => Math.max(m, y.order ?? -1), -1);
+      stocks.push(Object.assign({ id: uid(), order: maxOrder + 1 }, data));
+    }
     afterChange(st ? "已更新" : "已加入股票清單");
     fetchQuotes(true);
+  });
+}
+
+// ---------- 記錄買進／賣出 ----------
+function openTradeForm(st, tx, side) {
+  if (!st) return;
+  side = tx ? tx.side : (side || "buy");
+  const q = quotes[st.code];
+  const now = new Date();
+  const defAcc = stockAccount() ? stockAccount().id : (banks()[0] ? banks()[0].id : "");
+  const t = tx || {
+    date: todayStr(), time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+    shares: "", price: q ? q.price : "", fee: "", tax: "", accountId: defAcc, note: ""
+  };
+  let feeTouched = !!tx, taxTouched = !!tx;
+  const p = position(st, tx ? tx.id : undefined);
+
+  openSheet(`${tx ? "編輯" : "記錄"}買賣：${st.code} ${stockName(st)}`, `<form id="trade-form" novalidate>
+    <div class="seg seg-2" role="group" aria-label="買進或賣出">
+      <button type="button" data-side="buy" aria-pressed="${side === "buy"}">買進</button>
+      <button type="button" data-side="sell" aria-pressed="${side === "sell"}">賣出</button>
+    </div>
+    <p class="small muted">目前持有 ${sharesText(p.shares)}${p.shares ? `，均價 ${priceText(Math.round(p.avg * 100) / 100)}` : ""}${q ? ` · 現價 ${priceText(q.price)}` : ""}</p>
+    <div class="form-row">
+      ${field("成交日期", `<input id="f-date" type="date" value="${t.date}">`)}
+      ${field("成交時間", `<input id="f-time" type="time" value="${t.time || ""}">`)}
+    </div>
+    <div class="form-row">
+      ${field("股數（1 張 = 1000 股）", `<input id="f-shares" type="number" inputmode="numeric" min="1" step="1" value="${t.shares}" placeholder="例如 1000">`)}
+      ${field("成交價（每股）", `<input id="f-price" type="number" inputmode="decimal" min="0" step="any" value="${t.price}">`)}
+    </div>
+    <div class="form-row">
+      ${field("手續費", `<input id="f-fee" type="number" inputmode="numeric" min="0" step="1" value="${t.fee}">`)}
+      <label class="field" id="tax-field"><span>交易稅</span><input id="f-tax" type="number" inputmode="numeric" min="0" step="1" value="${t.tax}"></label>
+    </div>
+    <label class="field"><span id="acc-label">${side === "buy" ? "從哪個帳戶付款" : "存入哪個帳戶"}</span>
+      <select id="f-acc">
+        ${banks().map(a => `<option value="${a.id}" ${a.id === t.accountId ? "selected" : ""}>${esc(a.bank)}${a.purpose ? `（${esc(a.purpose)}）` : ""}${stockAccount() && a.id === stockAccount().id ? "・交割帳戶" : ""}</option>`).join("")}
+        <option value="" ${!t.accountId ? "selected" : ""}>不連動帳戶</option>
+      </select>
+    </label>
+    ${field("備註", `<input id="f-note" value="${esc(t.note || "")}" placeholder="例如：定期定額" maxlength="30">`)}
+    <div class="card inset">
+      <div class="kv"><span class="muted">成交金額</span><span class="num" id="t-gross">NT$ 0</span></div>
+      <div class="kv total"><span id="t-label"></span><b class="num" id="t-total">NT$ 0</b></div>
+      <p class="small muted" id="t-after"></p>
+    </div>
+    ${formActions(!!tx)}
+  </form>`);
+
+  const num = id => Number($(id).value) || 0;
+  function update() {
+    const shares = num("f-shares"), price = num("f-price");
+    const gross = Math.round(shares * price);
+    if (!feeTouched) $("f-fee").value = gross ? tradeFee(gross, shares) : "";
+    if (!taxTouched) $("f-tax").value = gross && side === "sell" ? tradeTax(gross, st.code) : "";
+    $("tax-field").hidden = side === "buy";
+    $("acc-label").textContent = side === "buy" ? "從哪個帳戶付款" : "存入哪個帳戶";
+    const fee = num("f-fee"), tax = side === "sell" ? num("f-tax") : 0;
+    const total = side === "buy" ? gross + fee : gross - fee - tax;
+    $("t-gross").textContent = money(gross);
+    $("t-label").textContent = side === "buy" ? "實付金額（含手續費）" : "實收金額（扣手續費和稅）";
+    $("t-total").textContent = money(total);
+    const acc = findAccount(Number($("f-acc").value));
+    if (acc) {
+      const base = balanceOf(acc) - (tx ? effectOn(acc, tx) : 0);
+      const after = base + (side === "buy" ? -total : total);
+      $("t-after").textContent = `${acc.bank} 餘額 ${money(base)} → ${money(after)}${after < 0 ? "（餘額不足）" : ""}`;
+      $("t-after").className = "small " + (after < 0 ? "expense" : "muted");
+    } else {
+      $("t-after").textContent = "不連動帳戶：只記錄股票，不影響任何帳戶餘額。";
+      $("t-after").className = "small muted";
+    }
+  }
+  ["f-shares", "f-price", "f-acc"].forEach(id => { $(id).oninput = update; $(id).onchange = update; });
+  $("f-fee").oninput = () => { feeTouched = true; update(); };
+  $("f-tax").oninput = () => { taxTouched = true; update(); };
+  document.querySelectorAll("#trade-form .seg button").forEach(b => {
+    b.onclick = () => {
+      side = b.dataset.side;
+      document.querySelectorAll("#trade-form .seg button").forEach(y => y.setAttribute("aria-pressed", y === b));
+      taxTouched = false;
+      update();
+    };
+  });
+  update();
+
+  if (tx) {
+    armDelete($("f-del"), () => {
+      transactions = transactions.filter(y => y.id !== tx.id);
+      afterChange("已刪除這筆買賣");
+    });
+  }
+
+  bindSave("trade-form", () => {
+    const shares = num("f-shares"), price = num("f-price");
+    if (!(shares > 0) || !Number.isInteger(shares)) return showErr("股數請填正整數，例如 1000（1 張）或 50（零股）。");
+    if (!(price > 0)) return showErr("請輸入成交價。");
+    if (!$("f-date").value) return showErr("請選擇成交日期。");
+    if (side === "sell" && shares > p.shares) return showErr(`目前只持有 ${sharesText(p.shares)}，不能賣出 ${sharesText(shares)}。`);
+    const gross = Math.round(shares * price);
+    const fee = num("f-fee"), tax = side === "sell" ? num("f-tax") : 0;
+    const amount = side === "buy" ? gross + fee : gross - fee - tax;
+    if (amount <= 0) return showErr("手續費和稅比成交金額還多，請檢查金額。");
+    const accVal = $("f-acc").value;
+    const data = {
+      id: tx ? tx.id : uid(), type: "trade", side, stockId: st.id, code: st.code, name: stockName(st),
+      shares, price, fee, tax, amount, accountId: accVal ? Number(accVal) : null,
+      category: "股票", date: $("f-date").value, time: $("f-time").value, note: $("f-note").value.trim()
+    };
+    if (tx) transactions[transactions.findIndex(y => y.id === tx.id)] = data;
+    else transactions.push(data);
+    afterChange(`已記錄${side === "buy" ? "買進" : "賣出"} ${st.code} ${sharesText(shares)}`);
   });
 }
 
@@ -1896,6 +2296,14 @@ function syncEnabled() { return !!(syncSettings.url && syncSettings.token); }
 
 // 一筆紀錄在試算表上的樣子
 function sheetRow(t) {
+  if (t.type === "trade") {
+    return {
+      date: t.date, type: t.side === "buy" ? "股票買進" : "股票賣出",
+      category: `${t.code} ${t.name || ""}`.trim(), amount: t.amount,
+      account: t.accountId ? accountName(t.accountId) : "", toAccount: "",
+      note: `${t.shares} 股 @ ${t.price}` + (t.fee ? `，手續費 ${t.fee}` : "") + (t.tax ? `，交易稅 ${t.tax}` : "") + (t.time ? `，${t.time}` : "") + (t.note ? `，${t.note}` : "")
+    };
+  }
   const typeName = { expense: "支出", income: "收入", transfer: "轉帳" };
   return {
     date: t.date,
@@ -2018,6 +2426,7 @@ function localRecords() {
   const m = {};
   for (const col of COLLECTIONS) for (const r of collection(col)) m[col + ":" + r.id] = r;
   m["plan:all"] = { items: plan };
+  m["set:all"] = appSettings;
   return m;
 }
 
@@ -2045,6 +2454,7 @@ function setLocalRecord(key, data) {
   const i = key.indexOf(":");
   const col = key.slice(0, i), id = key.slice(i + 1);
   if (col === "plan") { plan = data ? data.items : []; return; }
+  if (col === "set") { appSettings = Object.assign({}, DEFAULT_SETTINGS, data || {}); return; }
   const arr = collection(col);
   if (!arr) return;
   const idx = arr.findIndex(r => String(r.id) === id);
@@ -2061,6 +2471,7 @@ function saveLocalOnly() {
   save(KEYS.plan, plan);
   save(KEYS.checks, checks);
   save(KEYS.stocks, stocks);
+  save(KEYS.settings, appSettings);
   save(DATA_KEYS.base, dataBase);
   save(DATA_KEYS.dirty, dirty);
   save(DATA_KEYS.rev, serverRev);
@@ -2099,7 +2510,7 @@ async function syncData() {
 // 第一次連結：雲端沒資料就上傳這台的；雲端已有資料就等你決定要不要下載
 async function initData() {
   const res = await postToSheet({ action: "sync", since: 0, changes: [] }, 3);
-  const live = res.changes.filter(c => c.data !== null && !c.key.startsWith("plan:"));
+  const live = res.changes.filter(c => c.data !== null && !c.key.startsWith("plan:") && !c.key.startsWith("set:"));
   if (!live.length) {
     dataBase = {};
     dirty = {};
@@ -2119,7 +2530,7 @@ async function downloadRemote() {
   const nTx = res.changes.filter(c => c.data && c.key.startsWith("tx:")).length;
   const ok = await askConfirm(`雲端有 ${nAcc} 個帳戶、${nTx} 筆紀錄。下載後，這台裝置目前的資料會被雲端的資料取代。確定要下載嗎？`, "下載雲端資料", true);
   if (!ok) return;
-  accounts = []; transactions = []; recurring = []; wishlist = []; checks = []; plan = []; stocks = [];
+  accounts = []; transactions = []; recurring = []; wishlist = []; checks = []; plan = []; stocks = []; appSettings = Object.assign({}, DEFAULT_SETTINGS);
   dataBase = {};
   dirty = {};
   applyRemote(res.changes);
@@ -2319,7 +2730,24 @@ document.addEventListener("click", e => {
     case "close-sheet": dismissSheet(); break;
 
     case "add-tx": openTxForm(null); break;
-    case "edit-tx": openTxForm(transactions.find(t => t.id === id)); break;
+    case "edit-tx": {
+      const t = transactions.find(x => x.id === id);
+      if (t && t.type === "trade") openTradeForm(stocks.find(x => x.id === t.stockId), t);
+      else openTxForm(t);
+      break;
+    }
+    case "trade-buy": openTradeForm(stocks.find(x => x.id === id), null, "buy"); break;
+    case "trade-sell": openTradeForm(stocks.find(x => x.id === id), null, "sell"); break;
+    case "stock-reorder": ui.stockReorder = !ui.stockReorder; render(); break;
+    case "stock-up": moveStock(id, -1); break;
+    case "stock-down": moveStock(id, 1); break;
+    case "stock-account": openStockAccountForm(); break;
+    case "stock-transfer-in": stockTransfer("in"); break;
+    case "stock-transfer-out": stockTransfer("out"); break;
+    case "stock-account-records":
+      ui.tab = "records"; ui.filterType = "all"; ui.filterAccount = String(appSettings.stockAccountId);
+      window.scrollTo(0, 0); render();
+      break;
 
     case "add-account": openAccountForm(null, "bank"); break;
     case "add-card": openAccountForm(null, "card"); break;
@@ -2354,6 +2782,7 @@ document.addEventListener("click", e => {
     case "clear-all": clearAll(); break;
 
     case "start-check": openCheckForm(); break;
+    case "check-days": openCheckDays(); break;
     case "view-check": openCheckDetail(checks.find(c => c.id === id)); break;
 
     case "add-stock": openStockForm(null); break;

@@ -4,7 +4,7 @@
 // 沒網路時：用之前存的檔案，App 照樣能打開
 // 更新 App 時，把下面的版本號加 1（例如 v2），舊的備用檔就會被清掉
 // ============================================================
-const CACHE = "bookkeeping-v3";
+const CACHE = "bookkeeping-v4";
 const FILES = [
   "./",
   "./index.html",
