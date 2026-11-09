@@ -4,7 +4,7 @@
 // 沒網路時：用之前存的檔案，App 照樣能打開
 // 更新 App 時，把下面的版本號加 1（例如 v2），舊的備用檔就會被清掉
 // ============================================================
-const CACHE = "bookkeeping-v7";
+const CACHE = "bookkeeping-v8";
 const FILES = [
   "./",
   "./index.html",
@@ -41,5 +41,16 @@ self.addEventListener("fetch", event => {
         return response;
       })
       .catch(() => caches.match(event.request).then(r => r || caches.match("./index.html")))
+  );
+});
+
+// 點通知：打開記帳本（已經開著就切過去）
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
+      for (const c of list) if ("focus" in c) return c.focus();
+      return self.clients.openWindow("./");
+    })
   );
 });

@@ -4,7 +4,7 @@
    區塊：
    1. 設定          2. 資料讀取與儲存   3. 工具
    4. 計算（餘額、信用卡、固定支出、分配）
-   5. 畫面（首頁、明細、帳戶、規劃、報表）
+   5. 畫面（首頁＋報表、明細、帳戶、規劃、股票、設定）
    6. 彈出表單      7. 動作（繳費、匯出、備份…）
    8. 事件處理      9. 啟動
    ============================================================ */
@@ -97,6 +97,10 @@ function catInfo(name) {
   return { name, icon: CAT_ICONS[name] || "eye", color: CAT_COLORS[name] || "#b9b2a3" };
 }
 
+// 齒輪（設定）
+ICONS.gear = [0, 45, 90, 135, 180, 225, 270, 315].map(a => `<rect class="f" x="20.5" y="4" width="7" height="9" rx="1.5" transform="rotate(${a} 24 24)"/>`).join("")
+  + `<circle class="f" cx="24" cy="24" r="13"/><circle cx="24" cy="24" r="5"/>`;
+
 function icon(name, cls = "") {
   return `<svg class="ic ${cls}" viewBox="0 0 48 48" aria-hidden="true">${ICONS[name] || ICONS.eye}</svg>`;
 }
@@ -141,7 +145,7 @@ function heroStats() {
   return { exp, level, rank, from: expNeeded(level), to: expNeeded(level + 1) };
 }
 const WEEKDAYS = "日一二三四五六";
-const TITLES = { home: "我的記帳本", records: "明細", accounts: "帳戶", plan: "規劃", stocks: "股票", reports: "報表" };
+const TITLES = { home: "我的記帳本", records: "明細", accounts: "帳戶", plan: "規劃", stocks: "股票", settings: "設定" };
 
 // ========== 2. 資料讀取與儲存 ==========
 // 若瀏覽器不允許 localStorage，改存在記憶體（重新整理後會消失）
@@ -363,7 +367,7 @@ function allocatedThisMonth() {
 // ========== 5. 畫面 ==========
 function render() {
   $("page-title").textContent = TITLES[ui.tab];
-  const views = { home: viewHome, records: viewRecords, accounts: viewAccounts, plan: viewPlan, stocks: viewStocks, reports: viewReports };
+  const views = { home: viewHome, records: viewRecords, accounts: viewAccounts, plan: viewPlan, stocks: viewStocks, settings: viewSettings };
   $("view").innerHTML = views[ui.tab]();
   document.querySelectorAll(".tabbar button").forEach(b => {
     const on = b.dataset.tab === ui.tab;
@@ -450,6 +454,7 @@ function viewHome() {
     ${recent.length ? `<div class="list">${recent.map(txRow).join("")}</div>`
       : `<div class="empty">${icon("slime","empty-ic")}<span>還沒有紀錄。按右下角「記一筆」開始你的冒險。</span></div>`}
   </section>`;
+  h += viewReports();
   return h;
 }
 
@@ -706,15 +711,102 @@ function viewPlan() {
 }
 
 function notifyHint() {
-  let perm = "unsupported";
-  try { if ("Notification" in window) perm = Notification.permission; } catch (e) { /* 不支援 */ }
-  if (perm === "granted") return `<p class="small muted">已開啟通知：App 開著時，繳款時間到會跳出通知。</p>`;
-  if (perm === "unsupported" || perm === "denied") return `<p class="small muted">到期的項目會顯示在首頁的「提醒」。</p>`;
-  return `<button class="btn-secondary" data-action="enable-notify">開啟到期通知</button>
-    <p class="small muted">App 開著時，時間到會跳出通知；沒開著時，下次打開會在首頁提醒。</p>`;
+  if (notifyStatus().state === "granted") return `<p class="small muted">已開啟通知：App 開著時，繳款時間到會跳出通知。</p>`;
+  return `<p class="small muted">到期的項目會顯示在首頁的「提醒」。想讓手機跳出通知，到「設定 → 通知設定」開啟。</p>
+    <button class="btn-secondary" data-action="tab" data-tab="settings">前往通知設定</button>`;
 }
 
-// ---- 5-5 報表 ----
+// ---------- 通知設定 ----------
+function notifyStatus() {
+  let standalone = false, ios = false;
+  try {
+    standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+    ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  } catch (e) { /* 偵測不到就當一般瀏覽器 */ }
+  let state = "unsupported";
+  try { if ("Notification" in window) state = Notification.permission; } catch (e) { /* 不支援 */ }
+  return { state, ios, standalone, android: /Android/i.test(navigator.userAgent) };
+}
+
+// 手機上要透過 Service Worker 才能跳出通知；電腦也可以直接顯示
+function showNote(title, body) {
+  try {
+    if (!("Notification" in window) || Notification.permission !== "granted") return false;
+    const opts = { body, icon: "icon-192.png", badge: "icon-192.png", tag: title };
+    const direct = () => { try { new Notification(title, opts); } catch (e) { /* 這個裝置只能用 Service Worker */ } };
+    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.ready.then(reg => reg.showNotification(title, opts)).catch(direct);
+    } else {
+      direct();
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function viewNotifySettings() {
+  const n = notifyStatus();
+  let pill, body;
+  if (n.state === "granted") {
+    pill = `<span class="pill pill-done">已開啟</span>`;
+    body = `<p class="small">這台裝置會跳出通知。按下面的按鈕試試看有沒有收到。</p>
+      <button class="btn-secondary" data-action="test-notify">傳送測試通知</button>`;
+  } else if (n.state === "default") {
+    pill = `<span class="pill pill-soon">還沒開啟</span>`;
+    body = `<p class="small">開啟後，固定支出到期、股票到價時，這台裝置會跳出通知。</p>
+      <button class="btn-primary" data-action="enable-notify">開啟通知</button>`;
+  } else if (n.state === "denied") {
+    pill = `<span class="pill pill-due">被封鎖了</span>`;
+    const steps = n.ios ? `打開 iPhone 的「<b>設定</b>」App →「<b>通知</b>」→ 找到「<b>記帳本</b>」→ 打開「允許通知」。`
+      : n.android ? `長按桌面上的記帳本圖示 →「<b>應用程式資訊</b>」→「<b>通知</b>」→ 打開。`
+      : `點網址列左邊的圖示 →「<b>通知</b>」改成「允許」，再重新整理頁面。`;
+    body = `<p class="small">之前選了「不允許」，要到裝置的設定裡打開：</p><p class="small">${steps}</p>
+      <p class="small muted">打開後回到這裡，重新整理一次。</p>`;
+  } else if (n.ios && !n.standalone) {
+    pill = `<span class="pill pill-due">要從主畫面打開</span>`;
+    body = `<p class="small">iPhone 只有從<b>主畫面的記帳本圖示</b>打開 App 時，才能開啟通知。用 Safari 分頁打開網址的話不行。</p>
+      <ol class="guide-steps">
+        <li>還沒加入主畫面的話：用 Safari 打開 App 網址 → 點下方「分享」→「<b>加入主畫面</b>」。</li>
+        <li>之後都從主畫面的記帳本圖示打開，再回到「設定 → 通知設定」按「開啟通知」。</li>
+      </ol>
+      <p class="small muted">需要 iOS 16.4 以上。</p>`;
+  } else if (n.ios) {
+    pill = `<span class="pill pill-due">iOS 版本太舊</span>`;
+    body = `<p class="small">iPhone 要 iOS 16.4 以上才能讓 App 跳出通知。到「設定 → 一般 → 軟體更新」更新後再試一次。</p>`;
+  } else {
+    pill = `<span class="pill pill-due">不支援</span>`;
+    body = `<p class="small">這個瀏覽器不支援通知。請改用 Chrome、Edge 或 Safari 打開 App。</p>`;
+  }
+
+  const alertCount = stocks.reduce((sum, st) => sum + alertsOf(st).length, 0);
+  return `<section class="card" id="notify-card">
+    <div class="sec-head"><h2>通知設定</h2>${pill}</div>
+    ${body}
+    <p class="small muted">裝置通知只有 App 開著，或剛切到背景時才會跳出。App 完全關掉時，要靠下面的 Gmail 提醒。</p>
+    <div class="notify-rows">
+      <div class="kv"><span><b>固定支出提醒</b><small class="muted"> · ${recurring.length} 筆，到每月設定的日期時間提醒</small></span>
+        <button class="btn-sm" data-action="tab" data-tab="plan">管理</button></div>
+      <div class="kv"><span><b>資金確認</b><small class="muted"> · ${checkDaysText()}</small></span>
+        <button class="btn-sm" data-action="check-days">設定日期</button></div>
+      <div class="kv"><span><b>股票到價提醒</b><small class="muted"> · ${alertCount} 個提醒</small></span>
+        <button class="btn-sm" data-action="tab" data-tab="stocks">管理</button></div>
+    </div>
+    <details class="guide">
+      <summary>Gmail 提醒（App 關著也會收到）</summary>
+      <p class="small">固定支出到期還沒按「已繳費」、股票到買入或賣出價時，會寄信到你的 Gmail。要先設定好雲端同步，再做一次下面的設定：</p>
+      <ol class="guide-steps">
+        <li>打開你的記帳試算表 →「<b>擴充功能 → Apps Script</b>」。</li>
+        <li>左邊點<b>鬧鐘圖示</b>「觸發條件」→ 右下角「<b>新增觸發條件</b>」。</li>
+        <li>要執行的功能選 <code>checkAll</code>，活動來源選「時間驅動」，類型選「分鐘計時器」，間隔選「每 15 分鐘」，按儲存。</li>
+        <li>出現授權畫面時，按「進階 → 前往（不安全）→ 允許」。</li>
+      </ol>
+      <p class="small muted">設定好之後，觸發條件頁面會看到一行 checkAll、每 15 分鐘。同一筆固定支出到期寄一次，3 天後還沒處理再寄一次；股票同一個提醒一天最多寄一封。</p>
+    </details>
+  </section>`;
+}
+
+// ---- 5-5 報表（顯示在首頁最近紀錄下方） ----
 function viewReports() {
   const ym = ui.reportMonth;
   const list = transactions.filter(t => t.date.startsWith(ym));
@@ -736,7 +828,7 @@ function viewReports() {
   }
   const purposes = Object.entries(byPurpose).sort((a, b) => b[1] - a[1]);
 
-  let h = monthNav(ym, "report");
+  let h = `<section class="report-head"><h2>報表</h2>${monthNav(ym, "report")}</section>`;
 
   h += `<section class="card"><h2>支出分類</h2>`;
   h += cats.length ? `<div class="donut-wrap">${donut(cats, out)}<div class="legend">
@@ -762,7 +854,12 @@ function viewReports() {
         <b class="num ${b < 0 ? "expense" : ""}">${money(b)}</b></div>`;
     }).join("") : `<div class="empty">還沒有帳戶。</div>`}
   </section>`;
+  return h;
+}
 
+// ---- 5-6 設定 ----
+function viewSettings() {
+  let h = viewNotifySettings();
   h += syncCard();
   h += `<section class="card">${syncGuide(!syncEnabled())}</section>`;
 
@@ -1670,7 +1767,11 @@ async function clearAll() {
 
 function enableNotify() {
   try {
-    Notification.requestPermission().then(() => render());
+    Notification.requestPermission().then(p => {
+      render();
+      if (p === "granted") { showNote("記帳本通知已開啟", "固定支出到期、股票到價時，會像這樣提醒你。"); toast("已開啟通知"); }
+      else if (p === "denied") toast("你選了不允許，之後要到裝置設定裡打開");
+    });
   } catch (e) {
     toast("這個瀏覽器無法開啟通知");
   }
@@ -1688,11 +1789,7 @@ function checkReminders(isStartup) {
       notified.add(key);
       newDue++;
       if (!isStartup) {
-        try {
-          if ("Notification" in window && Notification.permission === "granted") {
-            new Notification(`${r.name} 到期了`, { body: `${money(r.amount)}，由 ${accountName(r.accountId)} 扣款。打開 App 確認記帳。` });
-          }
-        } catch (e) { /* 不支援通知 */ }
+        showNote(`${r.name} 到期了`, `${money(r.amount)}，由 ${accountName(r.accountId)} 扣款。打開 App 確認記帳。`);
       }
     }
   }
@@ -2033,11 +2130,7 @@ function notifyTargets() {
   save(STOCK_ALERT_KEY, alerted);
   const line = a => `${a.st.code} ${a.st.name} ${a.kind === "buy" ? "到買入價" : "到賣出價"}`;
   toast(fresh.map(line).join("、"));
-  try {
-    if ("Notification" in window && Notification.permission === "granted") {
-      new Notification("股票到價提醒", { body: fresh.map(a => `${line(a)}：現價 ${priceText(a.q.price)}，設定 ${priceText(a.price)}`).join("\n") });
-    }
-  } catch (e) { /* 不支援通知 */ }
+  showNote("股票到價提醒", fresh.map(a => `${line(a)}：現價 ${priceText(a.q.price)}，設定 ${priceText(a.price)}`).join("\n"));
 }
 
 // ---------- 持股計算：期初持股 + 每一筆買賣紀錄 ----------
@@ -2967,7 +3060,7 @@ function copySyncCode(sfx = "") {
 }
 
 // ---------- 錯誤問題回報 ----------
-const REPORT_CATEGORIES = ["記帳", "帳戶", "資金確認", "固定支出", "股票系統", "存錢筒", "轉帳功能", "報表", "雲端同步", "其他"];
+const REPORT_CATEGORIES = ["記帳", "帳戶", "資金確認", "固定支出", "股票系統", "存錢筒", "轉帳功能", "報表", "雲端同步", "通知", "設定", "其他"];
 function openReportForm() {
   if (!serviceUrl() && !syncEnabled()) {
     openSheet("錯誤問題回報", `<div class="stack">
@@ -3152,6 +3245,9 @@ document.addEventListener("click", e => {
     case "edit-recurring": openRecurringForm(recurring.find(r => r.id === id)); break;
     case "open-recurring": openRecurringPay(recurring.find(r => r.id === id)); break;
     case "enable-notify": enableNotify(); break;
+    case "test-notify":
+      toast(showNote("記帳本測試通知", "通知設定成功！到期的固定支出和股票到價都會這樣提醒你。") ? "已傳送測試通知" : "通知還沒開啟");
+      break;
 
     case "add-wish": openWishForm(null); break;
     case "edit-wish": openWishForm(wishlist.find(w => w.id === id)); break;
