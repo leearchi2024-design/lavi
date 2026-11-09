@@ -22,21 +22,21 @@ const KEYS = {
 };
 
 const CATEGORIES = {
-  expense: ["餐飲", "交通", "購物", "居住", "娛樂", "醫療", "學習", "其他"],
+  expense: ["餐飲", "交通", "購物", "居住", "娛樂", "醫療", "學習", "手續費", "其他"],
   income: ["薪資", "獎金", "投資", "其他收入"]
 };
 
 // 圖表用的顏色（漫畫風的平塗色）
 const CAT_COLORS = {
   "餐飲": "#ffcf3f", "交通": "#5b8def", "購物": "#ff7a59", "居住": "#9b7bd8",
-  "娛樂": "#ff9ec4", "醫療": "#4cbf8f", "學習": "#8fb339", "其他": "#b9b2a3",
+  "娛樂": "#ff9ec4", "醫療": "#4cbf8f", "學習": "#8fb339", "手續費": "#e0b04a", "其他": "#b9b2a3",
   "薪資": "#ffcf3f", "獎金": "#5b8def", "投資": "#4cbf8f", "其他收入": "#b9b2a3"
 };
 
 // 每個分類對應的怪物／寶物
 const CAT_ICONS = {
   "餐飲": "slime", "交通": "bat", "購物": "mimic", "居住": "golem",
-  "娛樂": "ghost", "醫療": "potion", "學習": "book", "其他": "eye",
+  "娛樂": "ghost", "醫療": "potion", "學習": "book", "手續費": "coins", "其他": "eye",
   "薪資": "coins", "獎金": "gem", "投資": "sprout", "其他收入": "bag"
 };
 const MONSTER_NAMES = {
@@ -72,6 +72,30 @@ const ICONS = {
   chart: `<rect class="f" x="5" y="8" width="38" height="32" rx="4"/><path d="M11 33 L19 24 L25 28 L36 15"/><path d="M29 15 H36 V22"/><circle class="k n" cx="19" cy="24" r="2.3"/><circle class="k n" cx="25" cy="28" r="2.3"/>`,
   orb: `<path class="f" d="M13 35 H35 L38 43 H10 Z"/><circle class="f" cx="24" cy="19" r="14"/><path d="M16 15 Q18 9 24 8"/><path class="k n" d="M28 17 L29.6 21.4 L34 23 L29.6 24.6 L28 29 L26.4 24.6 L22 23 L26.4 21.4 Z"/>`
 };
+
+// ---------- 收支分類（可以自訂，存在 appSettings.categories，會跟著雲端同步） ----------
+const ICON_LABELS = {
+  slime: "史萊姆", bat: "蝙蝠", mimic: "寶箱怪", golem: "石頭人", ghost: "幽靈", potion: "藥水怪",
+  book: "魔法書", eye: "眼球怪", boss: "魔王", coins: "金幣", gem: "寶石", sprout: "魔法嫩芽",
+  bag: "錢袋", chest: "寶箱", shield: "盾牌", scroll: "卷軸", map: "地圖", orb: "水晶球"
+};
+const CAT_ICON_CHOICES = Object.keys(ICON_LABELS);
+
+function defaultCats(type) {
+  return CATEGORIES[type].map(n => ({ name: n, icon: CAT_ICONS[n] || "eye", color: CAT_COLORS[n] || "#b9b2a3" }));
+}
+function catList(type) {
+  const c = appSettings.categories && appSettings.categories[type];
+  return c && c.length ? c : defaultCats(type);
+}
+// 找分類的圖示和顏色；分類被刪掉的舊紀錄，用內建或預設樣式
+function catInfo(name) {
+  for (const type of ["expense", "income"]) {
+    const found = catList(type).find(c => c.name === name);
+    if (found) return found;
+  }
+  return { name, icon: CAT_ICONS[name] || "eye", color: CAT_COLORS[name] || "#b9b2a3" };
+}
 
 function icon(name, cls = "") {
   return `<svg class="ic ${cls}" viewBox="0 0 48 48" aria-hidden="true">${ICONS[name] || ICONS.eye}</svg>`;
@@ -363,9 +387,10 @@ function txRow(t) {
   const isIn = t.type === "income";
   const isTr = t.type === "transfer";
   const title = isTr ? (t.alloc ? "資金分配" : "轉帳") : t.category;
-  const detail = isTr ? `${accountName(t.accountId)} → ${accountName(t.toAccountId)}` : accountName(t.accountId);
-  const iconName = isTr ? "portal" : (CAT_ICONS[t.category] || "eye");
-  const color = isTr ? "#ffffff" : (CAT_COLORS[t.category] || "#b9b2a3");
+  const feeTx = isTr ? transactions.find(x => x.feeOf === t.id) : null;
+  const detail = isTr ? `${accountName(t.accountId)} → ${accountName(t.toAccountId)}${feeTx ? `（手續費 ${money(feeTx.amount)}）` : ""}` : accountName(t.accountId);
+  const iconName = isTr ? "portal" : catInfo(t.category).icon;
+  const color = isTr ? "#ffffff" : catInfo(t.category).color;
   const cls = isIn ? "income" : isTr ? "transfer" : "expense";
   const sign = isIn ? "+" : isTr ? "" : "−";
   const note = t.note && !(isTr && t.alloc && t.note === "資金分配") ? " · " + esc(t.note) : "";
@@ -637,7 +662,7 @@ function viewPlan() {
         : s.state === "soon" ? `<span class="pill pill-soon">${s.label}</span>`
         : `<span class="pill">${md(s.dueStr)}</span>`;
       return `<button class="row" data-action="open-recurring" data-id="${r.id}">
-        <span class="badge" style="background:${CAT_COLORS[r.category] || "#b9b2a3"}">${icon("boss")}</span>
+        <span class="badge" style="background:${catInfo(r.category).color}">${icon("boss")}</span>
         <span class="row-main"><b>${esc(r.name)} ${pill}</b><small>每月 ${r.day} 號 ${esc(r.time)} · ${esc(accountName(r.accountId))} · ${esc(r.category)}</small></span>
         <span class="amt num expense">${money(r.amount)}</span>
       </button>`;
@@ -659,7 +684,9 @@ function viewPlan() {
       const p = w.target > 0 ? Math.min(1, w.saved / w.target) : 0;
       const ready = w.saved >= w.target;
       return `<div class="card wish ${ready ? "is-ready" : ""}">
-        <button class="wish-top" data-action="edit-wish" data-id="${w.id}"><span class="wish-icon">${icon("chest")}</span><span><b>${esc(w.name)}</b><small>存在 ${esc(accountName(w.accountId))}</small></span></button>
+        ${w.photo ? `<button class="wish-photo-btn" data-action="edit-wish" data-id="${w.id}" aria-label="編輯 ${esc(w.name)}"><img class="wish-photo" src="${w.photo}" alt="${esc(w.name)}"></button>` : ""}
+        <button class="wish-top" data-action="edit-wish" data-id="${w.id}">${w.photo ? "" : `<span class="wish-icon">${icon("chest")}</span>`}<span><b>${esc(w.name)}</b><small>存在 ${esc(accountName(w.accountId))}</small></span></button>
+        ${w.link ? `<a class="wish-link" href="${esc(w.link)}" target="_blank" rel="noopener">查看商品 ↗</a>` : ""}
         <div class="wish-amt"><b class="num">${money(w.saved)}</b><small class="muted num">/ ${money(w.target)}</small></div>
         <div class="meter"><i style="width:${p * 100}%"></i></div>
         <div class="wish-foot">
@@ -682,7 +709,7 @@ function notifyHint() {
   let perm = "unsupported";
   try { if ("Notification" in window) perm = Notification.permission; } catch (e) { /* 不支援 */ }
   if (perm === "granted") return `<p class="small muted">已開啟通知：App 開著時，繳款時間到會跳出通知。</p>`;
-  if (perm === "unsupported" || perm === "denied") return `<p class="small muted">到期的項目會顯示在首頁的「待繳提醒」。</p>`;
+  if (perm === "unsupported" || perm === "denied") return `<p class="small muted">到期的項目會顯示在首頁的「提醒」。</p>`;
   return `<button class="btn-secondary" data-action="enable-notify">開啟到期通知</button>
     <p class="small muted">App 開著時，時間到會跳出通知；沒開著時，下次打開會在首頁提醒。</p>`;
 }
@@ -713,7 +740,7 @@ function viewReports() {
 
   h += `<section class="card"><h2>支出分類</h2>`;
   h += cats.length ? `<div class="donut-wrap">${donut(cats, out)}<div class="legend">
-      ${cats.map(([c, v]) => `<div class="kv"><span><span class="dot" style="background:${CAT_COLORS[c] || "#b9b2a3"}"></span>${esc(c)}</span>
+      ${cats.map(([c, v]) => `<div class="kv"><span><span class="dot" style="background:${catInfo(c).color}"></span>${esc(c)}</span>
         <span class="num">${money(v)} <small class="muted">${Math.round(v / out * 100)}%</small></span></div>`).join("")}
     </div></div>` : `<div class="empty">這個月沒有支出。</div>`;
   h += `</section>`;
@@ -737,6 +764,7 @@ function viewReports() {
   </section>`;
 
   h += syncCard();
+  h += `<section class="card">${syncGuide(!syncEnabled())}</section>`;
 
   h += `<section class="card"><h2>資料管理</h2>
     <p class="small muted">資料存在這個瀏覽器裡。要換到手機或其他電腦時，先在這裡備份，再到新裝置還原。</p>
@@ -744,7 +772,13 @@ function viewReports() {
       <button class="btn-secondary" data-action="export-csv">匯出 CSV</button>
       <button class="btn-secondary" data-action="backup">備份資料</button>
       <button class="btn-secondary" data-action="restore">還原備份</button>
+      <button class="btn-secondary" data-action="manage-cats">分類管理</button>
       <button class="btn-danger" data-action="clear-all">清除全部資料</button>
+    </div>
+    <div class="report-box">
+      <b>錯誤問題回報</b>
+      <p class="small muted">遇到問題或想要新功能，寫下來送出，會自動記到 Notion「錯誤修正」最新一頁的待修正清單。</p>
+      <button class="btn-secondary" data-action="report-bug">回報問題</button>
     </div>
     <input type="file" id="restore-file" accept=".json,application/json" hidden>
   </section>`;
@@ -756,7 +790,7 @@ function donut(cats, total) {
   let offset = 0;
   const segs = cats.map(([c, v]) => {
     const len = v / total * C;
-    const s = `<circle r="${r}" cx="70" cy="70" fill="none" stroke="${CAT_COLORS[c] || "#b9b2a3"}" stroke-width="22"
+    const s = `<circle r="${r}" cx="70" cy="70" fill="none" stroke="${catInfo(c).color}" stroke-width="22"
       stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-offset}" transform="rotate(-90 70 70)"><title>${esc(c)} ${money(v)}</title></circle>`;
     offset += len;
     return s;
@@ -856,8 +890,10 @@ function accountSelect(id, list, selected) {
 }
 
 function catSelect(type, selected) {
-  return `<select id="f-cat">${CATEGORIES[type].map(c =>
-    `<option value="${c}" ${c === selected ? "selected" : ""}>${c}${MONSTER_NAMES[c] ? "・" + MONSTER_NAMES[c] : ""}</option>`).join("")}</select>`;
+  const list = catList(type).slice();
+  if (selected && !list.some(c => c.name === selected)) list.push(catInfo(selected));   // 已刪除的分類，舊紀錄仍保留
+  return `<select id="f-cat">${list.map(c =>
+    `<option value="${esc(c.name)}" ${c.name === selected ? "selected" : ""}>${esc(c.name)}・${ICON_LABELS[c.icon] || ""}</option>`).join("")}</select>`;
 }
 
 function formActions(withDelete, saveText = "儲存") {
@@ -940,15 +976,27 @@ function openTxForm(tx, preset = {}) {
     const acc = keepAccount && $("f-acc") ? Number($("f-acc").value) : t.accountId;
     const cat = t.type === type ? t.category : null;
     let html;
+    const manage = `<button type="button" class="link small-link" id="f-manage-cats">＋ 新增或管理分類</button>`;
     if (type === "expense") {
-      html = `<div class="form-row">${field("分類", catSelect("expense", cat))}${field("付款方式", accountSelect("f-acc", [...banks(), ...cards()], acc))}</div>`;
+      html = `<div class="form-row">${field("分類", catSelect("expense", cat))}${field("付款方式", accountSelect("f-acc", [...banks(), ...cards()], acc))}</div>${manage}`;
     } else if (type === "income") {
-      html = `<div class="form-row">${field("分類", catSelect("income", cat))}${field("入帳帳戶", accountSelect("f-acc", banks(), acc))}</div>`;
+      html = `<div class="form-row">${field("分類", catSelect("income", cat))}${field("入帳帳戶", accountSelect("f-acc", banks(), acc))}</div>${manage}`;
     } else {
+      const feeTx = tx ? transactions.find(x => x.feeOf === tx.id) : null;
       html = `<div class="form-row">${field("轉出帳戶", accountSelect("f-acc", banks(), acc))}${field("轉入帳戶", accountSelect("f-to", [...banks(), ...cards()], t.toAccountId))}</div>
-        <p class="small muted">繳信用卡費：轉入帳戶選信用卡。轉帳不算收入或支出。</p>`;
+        ${field("轉帳手續費（沒有就留空）", `<input id="f-fee" type="number" inputmode="numeric" min="0" step="any" value="${feeTx ? feeTx.amount : ""}" placeholder="例如跨行轉帳 15 元">`)}
+        <p class="small muted">手續費會從轉出帳戶扣除，記成一筆「手續費」支出。繳信用卡費：轉入帳戶選信用卡。轉帳本身不算收入或支出。</p>`;
     }
     $("tx-dynamic").innerHTML = html;
+    const mc = $("f-manage-cats");
+    if (mc) mc.onclick = () => {
+      // 先記住已經填的內容，管理完分類後回到這裡
+      const keep = { type, amount: $("f-amount").value, accountId: Number($("f-acc").value), date: $("f-date").value, note: $("f-note").value };
+      openCatManager(type, newCat => {
+        if (tx) openTxForm(tx);
+        else openTxForm(null, Object.assign(keep, newCat ? { category: newCat } : {}));
+      });
+    };
   }
   drawFields(false);
 
@@ -962,7 +1010,7 @@ function openTxForm(tx, preset = {}) {
 
   if (tx) {
     armDelete($("f-del"), () => {
-      transactions = transactions.filter(x => x.id !== tx.id);
+      transactions = transactions.filter(x => x.id !== tx.id && x.feeOf !== tx.id);   // 連同手續費一起刪
       afterChange("已刪除");
     });
   }
@@ -974,16 +1022,32 @@ function openTxForm(tx, preset = {}) {
     if (!date) return showErr("請選擇日期。");
 
     const data = { id: tx ? tx.id : uid(), type, amount, accountId: Number($("f-acc").value), date, note: $("f-note").value.trim() };
+    let fee = 0;
     if (type === "transfer") {
       data.toAccountId = Number($("f-to").value);
       if (data.toAccountId === data.accountId) return showErr("轉出和轉入不能是同一個帳戶。");
       if (tx && tx.alloc) data.alloc = true;
+      fee = Math.round((Number($("f-fee").value) || 0) * 100) / 100;
+      if (fee < 0) return showErr("手續費不能是負的。");
     } else {
       data.category = $("f-cat").value;
     }
 
     if (tx) transactions[transactions.findIndex(x => x.id === tx.id)] = data;
     else transactions.push(data);
+
+    // 轉帳手續費：另外記一筆支出，和這筆轉帳綁在一起
+    const oldFee = transactions.find(x => x.feeOf === data.id);
+    if (fee > 0) {
+      const feeData = {
+        id: oldFee ? oldFee.id : uid() + 1, type: "expense", amount: fee, accountId: data.accountId,
+        category: "手續費", date, note: "轉帳手續費" + (data.note ? `（${data.note}）` : ""), feeOf: data.id
+      };
+      if (oldFee) transactions[transactions.indexOf(oldFee)] = feeData;
+      else transactions.push(feeData);
+    } else if (oldFee) {
+      transactions = transactions.filter(x => x !== oldFee);
+    }
     afterChange(tx ? "已更新" : "已記下");
 
     // 新的收入：詢問要不要做資金分配
@@ -992,6 +1056,91 @@ function openTxForm(tx, preset = {}) {
       if (ok) openAllocate(data.accountId, amount);
     }
   });
+}
+
+// ---- 6-1b 分類管理 ----
+// back：管理完要回到哪裡（例如回到記一筆），會收到剛新增的分類名稱
+function openCatManager(type = "expense", back = null) {
+  let picked = { icon: "slime", color: ACCOUNT_COLORS[0] };
+  let lastAdded = null;
+
+  function draw() {
+    const list = catList(type);
+    $("sheet-body").innerHTML = `<div class="stack" id="cat-form">
+      <div class="seg seg-2" role="group" aria-label="支出或收入">
+        <button type="button" data-ctype="expense" aria-pressed="${type === "expense"}">支出分類</button>
+        <button type="button" data-ctype="income" aria-pressed="${type === "income"}">收入分類</button>
+      </div>
+      <div class="list list-inset">
+        ${list.map(c => `<div class="row">
+          <span class="badge" style="background:${c.color}">${icon(c.icon)}</span>
+          <span class="row-main"><b>${esc(c.name)}</b><small>${ICON_LABELS[c.icon] || ""}</small></span>
+          <button type="button" class="btn-sm cat-del" data-name="${esc(c.name)}" ${list.length <= 1 ? "disabled" : ""}>刪除</button>
+        </div>`).join("")}
+      </div>
+      <p class="small muted">刪除分類不會改到舊紀錄，舊紀錄會保留原本的分類名稱。</p>
+      <div class="card inset">
+        <b>新增${type === "expense" ? "支出" : "收入"}分類</b>
+        ${field("分類名稱", `<input id="c-name" maxlength="10" placeholder="${type === "expense" ? "例如：寵物、住宿" : "例如：兼職、退款"}" autocomplete="off">`)}
+        <div class="field"><span>圖示</span><div class="icon-grid">
+          ${CAT_ICON_CHOICES.map(k => `<button type="button" class="icon-pick" data-icon="${k}" aria-pressed="${k === picked.icon}" aria-label="${ICON_LABELS[k]}" title="${ICON_LABELS[k]}">${icon(k)}</button>`).join("")}
+        </div></div>
+        <div class="field"><span>顏色</span><div class="swatches">
+          ${ACCOUNT_COLORS.map(c => `<button type="button" class="swatch" data-color="${c}" style="background:${c}" aria-pressed="${c === picked.color}" aria-label="選擇顏色"></button>`).join("")}
+        </div></div>
+        <p class="form-err" id="f-err" role="alert"></p>
+        <button type="button" class="btn-primary" id="c-add">新增分類</button>
+      </div>
+      <button type="button" class="btn-secondary" id="c-done">${back ? "完成，回到記帳" : "完成"}</button>
+    </div>`;
+
+    document.querySelectorAll("#cat-form [data-ctype]").forEach(b => {
+      b.onclick = () => { type = b.dataset.ctype; draw(); };
+    });
+    document.querySelectorAll("#cat-form .icon-pick").forEach(b => {
+      b.onclick = () => {
+        picked.icon = b.dataset.icon;
+        document.querySelectorAll("#cat-form .icon-pick").forEach(x => x.setAttribute("aria-pressed", x === b));
+      };
+    });
+    document.querySelectorAll("#cat-form .swatch").forEach(b => {
+      b.onclick = () => {
+        picked.color = b.dataset.color;
+        document.querySelectorAll("#cat-form .swatch").forEach(x => x.setAttribute("aria-pressed", x === b));
+      };
+    });
+    document.querySelectorAll("#cat-form .cat-del").forEach(b => {
+      b.onclick = () => {
+        if (!b.dataset.armed) { b.dataset.armed = "1"; b.textContent = "確定刪除？"; b.classList.add("danger-sm"); return; }
+        setCats(type, catList(type).filter(c => c.name !== b.dataset.name));
+        toast(`已刪除分類「${b.dataset.name}」`);
+        draw();
+      };
+    });
+    const add = () => {
+      const name = $("c-name").value.trim();
+      if (!name) return showErr("請輸入分類名稱。");
+      if (catList("expense").concat(catList("income")).some(c => c.name === name)) return showErr(`「${name}」已經有了。`);
+      setCats(type, catList(type).concat([{ name, icon: picked.icon, color: picked.color }]));
+      lastAdded = name;
+      toast(`已新增分類「${name}」`);
+      draw();
+    };
+    $("c-add").onclick = add;
+    $("c-name").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); add(); } };
+    $("c-done").onclick = () => { if (back) back(lastAdded); else closeSheet(); };
+  }
+
+  openSheet("分類管理", "");
+  draw();
+}
+
+function setCats(type, list) {
+  const cats = Object.assign({ expense: catList("expense"), income: catList("income") }, appSettings.categories || {});
+  cats[type] = list.map(c => ({ name: c.name, icon: c.icon, color: c.color }));
+  appSettings.categories = cats;
+  persist();
+  render();
 }
 
 // ---- 6-2 銀行帳戶／信用卡 ----
@@ -1204,12 +1353,63 @@ function openRecurringForm(r) {
 }
 
 // ---- 6-6 存錢筒 ----
+// 照片壓縮：縮小成適合手機看的大小，存成文字一起同步
+// （雲端每筆資料有大小上限，所以壓到大約 38,000 字元以內）
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("讀不到這張照片"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("這個檔案不是照片，或格式不支援"));
+      img.onload = () => {
+        let size = 520, quality = 0.75, out = "";
+        for (let i = 0; i < 8; i++) {
+          const scale = Math.min(1, size / Math.max(img.width, img.height));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          out = canvas.toDataURL("image/jpeg", quality);
+          if (out.length <= 38000) return resolve(out);
+          size = Math.round(size * 0.8);
+          quality = Math.max(0.4, quality - 0.08);
+        }
+        resolve(out);
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function normalizeLink(v) {
+  v = v.trim();
+  if (!v) return "";
+  return /^https?:\/\//i.test(v) ? v : "https://" + v;
+}
+
 function openWishForm(w) {
   if (!banks().length) return toast("請先新增銀行帳戶");
-  const x = w || { name: "", target: "", saved: 0, accountId: banks()[0].id };
+  const x = w || { name: "", target: "", saved: 0, accountId: banks()[0].id, photo: "", link: "" };
+  let photo = x.photo || "";
 
   openSheet(w ? "編輯存錢筒" : "新增想買的東西", `<form id="wish-form" novalidate>
+    <div class="field"><span>照片</span>
+      <div class="photo-box">
+        <img id="w-preview" class="photo-preview" alt="商品照片" ${photo ? `src="${photo}"` : "hidden"}>
+        <div class="photo-actions">
+          <label class="btn-sm photo-pick">${photo ? "換一張" : "選擇照片"}<input id="f-photo" type="file" accept="image/*" hidden></label>
+          <button type="button" class="btn-sm" id="w-remove" ${photo ? "" : "hidden"}>移除照片</button>
+          <small class="muted" id="w-photo-msg">${photo ? "" : "可以拍照或從相簿選"}</small>
+        </div>
+      </div>
+    </div>
     ${field("想買什麼", `<input id="f-name" value="${esc(x.name)}" placeholder="例如：新耳機" maxlength="30">`)}
+    ${field("商品連結（選填）", `<input id="f-link" type="url" inputmode="url" value="${esc(x.link || "")}" placeholder="貼上購物網站的網址" autocomplete="off" spellcheck="false">`)}
     <div class="form-row">
       ${field("目標金額", `<input id="f-target" type="number" min="1" value="${x.target}">`)}
       ${field("已經存了", `<input id="f-saved" type="number" min="0" value="${x.saved}">`)}
@@ -1217,6 +1417,29 @@ function openWishForm(w) {
     ${field("錢存在哪個帳戶", accountSelect("f-acc", banks(), x.accountId))}
     ${formActions(!!w)}
   </form>`);
+
+  const showPhoto = () => {
+    $("w-preview").hidden = !photo;
+    if (photo) $("w-preview").src = photo;
+    $("w-remove").hidden = !photo;
+    document.querySelector("#wish-form .photo-pick").firstChild.textContent = photo ? "換一張" : "選擇照片";
+  };
+  $("f-photo").onchange = async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    $("w-photo-msg").textContent = "處理中…";
+    try {
+      photo = await compressImage(file);
+      $("w-photo-msg").textContent = "";
+      showErr("");
+    } catch (err) {
+      $("w-photo-msg").textContent = "";
+      showErr(err.message);
+    }
+    showPhoto();
+    e.target.value = "";
+  };
+  $("w-remove").onclick = () => { photo = ""; showPhoto(); $("w-photo-msg").textContent = "可以拍照或從相簿選"; };
 
   if (w) {
     armDelete($("f-del"), () => {
@@ -1231,7 +1454,9 @@ function openWishForm(w) {
     const saved = Number($("f-saved").value) || 0;
     if (!name) return showErr("請輸入品名。");
     if (!(target > 0)) return showErr("請輸入目標金額。");
-    const data = { name, target, saved, accountId: Number($("f-acc").value) };
+    const link = normalizeLink($("f-link").value);
+    if (link && !/^https?:\/\/[^\s.]+\.[^\s]+$/i.test(link)) return showErr("商品連結看起來不是網址，請貼上完整的網址。");
+    const data = { name, target, saved, accountId: Number($("f-acc").value), photo, link };
     if (w) Object.assign(w, data);
     else wishlist.push(Object.assign({ id: uid(), bought: false }, data));
     afterChange(w ? "已更新" : "已新增");
@@ -2627,6 +2852,111 @@ function syncCard() {
   </section>`;
 }
 
+// ---------- 同步說明（怎麼連結、怎麼運作） ----------
+function syncGuide(open, sfx = "") {
+  return `<details class="guide" id="sync-guide${sfx}" ${open ? "open" : ""}>
+    <summary>怎麼連結 Google 試算表？同步怎麼運作？</summary>
+    <b class="guide-title">第一次連結（第一台裝置）</b>
+    <ol class="guide-steps">
+      <li>到 <b>sheets.google.com</b> 建立一個空白試算表，取名例如「記帳本」。</li>
+      <li>點上方選單「<b>擴充功能 → Apps Script</b>」，刪掉編輯區原本的程式碼。</li>
+      <li>按下面的「複製同步程式碼」，貼進編輯區。找到 <code>const TOKEN = "請改成你的同步密碼";</code>，把雙引號裡改成你自己設定的密碼（英文和數字），按儲存。</li>
+      <li>點右上角「<b>部署 → 新增部署作業</b>」，齒輪選「網頁應用程式」，執行身分選「我」、存取權選「<b>所有人</b>」，按部署。</li>
+      <li>授權時出現「Google 尚未驗證這個應用程式」是正常的，按「進階 → 前往（不安全）→ 允許」。</li>
+      <li>複製「網頁應用程式網址」（開頭 https://script.google.com/macros/s/，結尾 /exec），回到這裡按「設定同步」，貼上網址和密碼，按「測試並儲存」。</li>
+    </ol>
+    <div class="copy-row">
+      <button type="button" class="btn-sm primary" data-action="copy-sync-code" data-sfx="${sfx}">複製同步程式碼</button>
+      <small class="muted" id="copy-msg${sfx}"></small>
+    </div>
+    <textarea id="sync-code${sfx}" class="code-box" readonly hidden aria-label="同步程式碼"></textarea>
+    <b class="guide-title">第二台裝置（例如電腦）</b>
+    <p class="small">打開同一個 App 網址，按「設定同步」，填<b>一樣的網址和密碼</b>，再按「下載雲端資料」。之後兩邊就會共用同一份資料。</p>
+    <b class="guide-title">同步怎麼運作</b>
+    <ul class="guide-list">
+      <li>記帳、修改、刪除後，幾秒內自動上傳到你的試算表。</li>
+      <li>打開 App、從背景切回 App，以及開著時每分鐘，會自動下載另一台的變動。想馬上看到可以按「立即同步」。</li>
+      <li>兩台同時改了同一筆，以最後修改的那一次為準。</li>
+      <li>沒有網路時記的帳會先存在這台，有網路後自動補傳。</li>
+      <li>試算表會整理出「記帳紀錄」「帳戶餘額」「資金確認」分頁給你看。隱藏的「App資料」分頁是兩台共用的資料庫，請不要修改。</li>
+      <li>資料存在你自己的 Google 雲端硬碟，只有你看得到。網址和密碼不要分享給別人。</li>
+    </ul>
+  </details>`;
+}
+
+let syncCodeText = "";
+function prefetchSyncCode() {
+  if (syncCodeText) return Promise.resolve(syncCodeText);
+  return fetch("sync-script.txt", { cache: "no-store" })
+    .then(r => { if (!r.ok) throw new Error(); return r.text(); })
+    .then(t => { syncCodeText = t; return t; });
+}
+// 打開說明時先把程式碼抓下來，按複製時才能直接放進剪貼簿
+document.addEventListener("toggle", e => { if (String(e.target.id).startsWith("sync-guide") && e.target.open) prefetchSyncCode().catch(() => {}); }, true);
+
+function showCodeBox(sfx, text, msg) {
+  const box = $("sync-code" + sfx);
+  if (!box) return;
+  box.value = text;
+  box.hidden = false;
+  box.focus();
+  box.select();
+  $("copy-msg" + sfx).textContent = msg;
+}
+
+function copySyncCode(sfx = "") {
+  const msgEl = $("copy-msg" + sfx);
+  const manual = "請長按下面的程式碼，全選後複製";
+  if (syncCodeText) {
+    try {
+      navigator.clipboard.writeText(syncCodeText).then(
+        () => { msgEl.textContent = "已複製，可以貼到 Apps Script 了"; },
+        () => showCodeBox(sfx, syncCodeText, manual));
+    } catch (e) {
+      showCodeBox(sfx, syncCodeText, manual);
+    }
+    return;
+  }
+  msgEl.textContent = "讀取中…";
+  prefetchSyncCode()
+    .then(t => showCodeBox(sfx, t, manual))
+    .catch(() => { msgEl.textContent = "讀不到程式碼，請確認 GitHub 上有 sync-script.txt"; });
+}
+
+// ---------- 錯誤問題回報 ----------
+const REPORT_CATEGORIES = ["記帳", "帳戶", "資金確認", "固定支出", "股票系統", "存錢筒", "轉帳功能", "報表", "雲端同步", "其他"];
+function openReportForm() {
+  if (!syncEnabled()) {
+    openSheet("錯誤問題回報", `<div class="stack">
+      <p class="small">回報會透過 Google 試算表的同步程式送到 Notion，所以要先設定雲端同步。</p>
+      <button type="button" class="btn-primary" data-action="sync-settings">設定同步</button>
+    </div>`);
+    return;
+  }
+  openSheet("錯誤問題回報", `<form id="report-form" novalidate>
+    ${field("跟哪個功能有關", `<select id="r-cat">${REPORT_CATEGORIES.map(c => `<option>${c}</option>`).join("")}</select>`)}
+    ${field("發生什麼問題，或希望怎麼改", `<textarea id="r-msg" rows="5" maxlength="800" placeholder="例如：轉帳的時候想要可以扣手續費"></textarea>`)}
+    <p class="small muted">送出後會寫進 Notion「錯誤修正」裡日期最新的那一頁，放在「待修正」對應的分類下面。</p>
+    ${formActions(false, "送出回報")}
+  </form>`);
+  bindSave("report-form", async () => {
+    const message = $("r-msg").value.trim();
+    if (!message) return showErr("請寫下問題內容。");
+    const btn = $("report-form").querySelector("[data-save]");
+    btn.disabled = true;
+    btn.textContent = "送出中…";
+    try {
+      const res = await postToSheet({ action: "report", category: $("r-cat").value, message }, 5);
+      closeSheet();
+      toast(`已送出，記在「${res.page}」第 ${res.number} 項`);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "送出回報";
+      showErr(e.message);
+    }
+  });
+}
+
 function refreshSyncCard() {
   const el = $("sync-card");
   if (el) el.outerHTML = syncCard();
@@ -2650,6 +2980,7 @@ function unlinkData() {
 function openSyncSettings() {
   openSheet("雲端同步設定", `<form id="sync-form" novalidate>
     <p class="small muted">在試算表建立同步程式並部署後，把「網頁應用程式網址」和同步密碼貼在這裡。手機和電腦都要設定，填一樣的網址和密碼。</p>
+    ${syncGuide(!syncEnabled(), "-sheet")}
     ${field("網頁應用程式網址", `<input id="f-url" value="${esc(syncSettings.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" spellcheck="false">`)}
     ${field("同步密碼", `<input id="f-token" value="${esc(syncSettings.token)}" placeholder="和同步程式裡的 TOKEN 一樣" autocomplete="off" spellcheck="false">`)}
     ${syncEnabled() ? `<div class="btn-grid">
@@ -2733,6 +3064,7 @@ document.addEventListener("click", e => {
     case "edit-tx": {
       const t = transactions.find(x => x.id === id);
       if (t && t.type === "trade") openTradeForm(stocks.find(x => x.id === t.stockId), t);
+      else if (t && t.feeOf && transactions.some(x => x.id === t.feeOf)) openTxForm(transactions.find(x => x.id === t.feeOf));   // 手續費 → 打開它的轉帳
       else openTxForm(t);
       break;
     }
@@ -2780,6 +3112,9 @@ document.addEventListener("click", e => {
     case "backup": backup(); break;
     case "restore": $("restore-file").click(); break;
     case "clear-all": clearAll(); break;
+    case "manage-cats": openCatManager("expense"); break;
+    case "report-bug": openReportForm(); break;
+    case "copy-sync-code": copySyncCode(el.dataset.sfx || ""); break;
 
     case "start-check": openCheckForm(); break;
     case "check-days": openCheckDays(); break;

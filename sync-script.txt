@@ -1,0 +1,493 @@
+/**
+ * 我的記帳本：Google 試算表同步程式（第 5 版）
+ * ------------------------------------------------------------
+ * App 每次資料有變動，就會把變動送到這裡，這段程式會更新四個工作表：
+ *   記帳紀錄：每一筆收入、支出、轉帳
+ *   帳戶餘額：各銀行帳戶、信用卡目前的金額（每次整張更新）
+ *   資金確認：每月 5 號、17 號對帳的結果
+ *   App資料（隱藏）：手機和電腦共用的完整資料，請不要手動修改
+ *   股價（隱藏）：證交所查不到時，用 Google 財經查股價的暫存區
+ *
+ * Gmail 提醒（固定支出到期、股票到價，選用）：在 Apps Script 左邊的「觸發條件」
+ * 新增 checkAll，選「時間驅動」→「分鐘計時器」→「每 15 分鐘」。
+ *
+ * 錯誤問題回報寫入 Notion（選用）：把 Notion 整合的密鑰貼在下面 NOTION_TOKEN，
+ * 並在 Notion「錯誤修正」頁面的「連線」加入這個整合。貼過一次之後會記住，
+ * 以後更新程式碼時 NOTION_TOKEN 留空也可以。
+ *
+ * ⚠️ 下面 TOKEN 雙引號裡，請填你自己的同步密碼（和 App 裡填的一樣）。
+ * ⚠️ 不要把這段程式上傳到 GitHub，密碼會被別人看到。
+ */
+const TOKEN = "請改成你的同步密碼";
+const NOTION_TOKEN = "";                                   // Notion 整合密鑰（ntn_ 開頭），選用
+const NOTION_PARENT = "40ed474379d8808eb6c4fc8da089cef5";  // Notion「錯誤修正」頁面
+const VERSION = 5;
+const QUOTE_SHEET = "股價";
+const DATA_SHEET = "App資料";
+
+const SHEETS = {
+  tx: {
+    name: "記帳紀錄",
+    headers: ["ID", "日期", "類型", "分類", "金額", "帳戶", "轉入帳戶", "備註", "最後同步"],
+    values: (id, r, now) => [id, r.date, r.type, r.category, num(r.amount), r.account, r.toAccount, r.note, now],
+    formats: { "E:E": "#,##0" }
+  },
+  check: {
+    name: "資金確認",
+    headers: ["ID", "確認日期", "期別", "帳戶", "記帳本金額", "實際金額", "差額", "處理", "最後同步"],
+    values: (id, r, now) => [id, r.date, r.period, r.account, num(r.book), num(r.actual), num(r.diff), r.status, now],
+    formats: { "E:F": "#,##0", "G:G": "+#,##0;[Red]-#,##0;0" }
+  }
+};
+const BALANCE_SHEET = "帳戶餘額";
+const BALANCE_HEADERS = ["帳戶", "類型", "用途／扣款帳戶", "目前餘額", "可用餘額", "信用卡未出帳", "信用卡本期應繳", "更新時間"];
+
+// 用瀏覽器打開部署網址時顯示，用來確認部署成功
+function doGet() {
+  return ContentService.createTextOutput("記帳本同步程式（第 " + VERSION + " 版）已啟用。請把這個網址貼到 App 的「同步設定」。");
+}
+
+// App 送資料過來時執行
+function doPost(e) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);   // 手機和電腦同時送資料時，排隊一個一個處理
+  try {
+    const body = JSON.parse(e.postData.contents);
+    if (body.token !== TOKEN) {
+      return reply({ ok: false, version: VERSION, error: "同步密碼不對，請確認 App 和程式碼裡的密碼一樣" });
+    }
+    if (body.action === "report") {
+      return reply(Object.assign({ ok: true, version: VERSION }, writeReport(body)));
+    }
+    if (body.action === "quotes") {
+      return reply({ ok: true, version: VERSION, quotes: getQuotes(body.codes || []) });
+    }
+    if (body.action === "sync") {
+      return reply(Object.assign({ ok: true, version: VERSION }, syncData(body)));
+    }
+    if (body.ops && body.ops.length) applyOps(SHEETS.tx, body.ops);
+    if (body.checkOps && body.checkOps.length) applyOps(SHEETS.check, body.checkOps);
+    if (body.balances) writeBalances(body.balances);
+    return reply({ ok: true, version: VERSION });
+  } catch (err) {
+    return reply({ ok: false, version: VERSION, error: "試算表發生錯誤：" + err.message });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// 雙向同步：收下這台裝置的變動，再回傳其他裝置的變動
+// 每筆資料一列：鑰匙、修改時間、版本號、是否刪除、內容
+// 兩台裝置改了同一筆時，以修改時間比較晚的為準
+function syncData(body) {
+  const sheet = getDataSheet();
+  const props = PropertiesService.getScriptProperties();
+  let rev = Number(props.getProperty("rev") || 0);
+
+  const last = sheet.getLastRow();
+  const rows = last > 1 ? sheet.getRange(2, 1, last - 1, 5).getValues() : [];
+  const index = {};
+  rows.forEach((r, i) => { index[String(r[0])] = i; });
+
+  let changed = false;
+  (body.changes || []).forEach(c => {
+    const key = String(c.key);
+    const u = Number(c.u) || 0;
+    const json = c.data === null || c.data === undefined ? "" : JSON.stringify(c.data);
+    const i = index[key];
+    if (i !== undefined && u < Number(rows[i][1])) return;   // 雲端的比較新，不覆蓋
+    rev++;
+    const row = [key, u, rev, json ? 0 : 1, json];
+    if (i !== undefined) rows[i] = row;
+    else { index[key] = rows.length; rows.push(row); }
+    changed = true;
+  });
+
+  if (changed) {
+    sheet.getRange(2, 1, rows.length, 5).setValues(rows);
+    props.setProperty("rev", String(rev));
+  }
+
+  const since = Number(body.since) || 0;
+  const out = rows
+    .filter(r => Number(r[2]) > since)
+    .map(r => ({ key: String(r[0]), u: Number(r[1]), data: Number(r[3]) ? null : JSON.parse(r[4]) }));
+  return { rev: rev, changes: out };
+}
+
+function getDataSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(DATA_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(DATA_SHEET);
+    sheet.getRange("A:A").setNumberFormat("@");
+    sheet.getRange("E:E").setNumberFormat("@");
+    sheet.getRange(1, 1, 1, 5).setValues([["鑰匙", "修改時間", "版本", "已刪除", "內容"]]).setFontWeight("bold");
+    sheet.setFrozenRows(1);
+    sheet.hideSheet();
+  }
+  return sheet;
+}
+
+// 套用變動：有這個 ID 就更新那一列，沒有就新增，刪除就移除那一列
+function applyOps(config, ops) {
+  const sheet = getSheet(config.name, config.headers, config.formats);
+  const last = sheet.getLastRow();
+  const ids = last > 1 ? sheet.getRange(2, 1, last - 1, 1).getValues() : [];
+  const rowOf = {};
+  ids.forEach((r, i) => { rowOf[String(r[0])] = i + 2; });
+
+  const now = new Date();
+  const appends = [];
+  const appendAt = {};
+  const deletes = [];
+
+  ops.forEach(op => {
+    const id = String(op.id);
+    if (op.op === "delete") {
+      if (rowOf[id]) deletes.push(rowOf[id]);
+      return;
+    }
+    const values = config.values(id, op.row || {}, now);
+    if (rowOf[id]) {
+      sheet.getRange(rowOf[id], 1, 1, values.length).setValues([values]);
+    } else if (appendAt[id] !== undefined) {
+      appends[appendAt[id]] = values;
+    } else {
+      appendAt[id] = appends.length;
+      appends.push(values);
+    }
+  });
+
+  // 從下面往上刪，列號才不會跑掉
+  [...new Set(deletes)].sort((a, b) => b - a).forEach(row => sheet.deleteRow(row));
+
+  if (appends.length) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, appends.length, config.headers.length).setValues(appends);
+  }
+
+  // 依日期排序，舊的在上面
+  const total = sheet.getLastRow() - 1;
+  if (total > 1) {
+    sheet.getRange(2, 1, total, config.headers.length).sort([{ column: 2, ascending: true }, { column: 1, ascending: true }]);
+  }
+}
+
+// 帳戶餘額：整張清掉重寫
+function writeBalances(rows) {
+  const sheet = getSheet(BALANCE_SHEET, BALANCE_HEADERS, { "D:G": "#,##0;[Red]-#,##0;0" });
+  const now = new Date();
+  const values = rows.map(r => [r.account, r.kind, r.purpose, num(r.balance), blank(r.available), blank(r.unbilled), blank(r.billed), now]);
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, BALANCE_HEADERS.length).setValues([BALANCE_HEADERS]).setFontWeight("bold");
+  if (values.length) sheet.getRange(2, 1, values.length, BALANCE_HEADERS.length).setValues(values);
+}
+
+// 找到工作表，沒有就建立一個
+function getSheet(name, headers, formats) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.getRange("A:A").setNumberFormat("@");   // 第一欄當文字存，避免 ID 變成科學記號
+    Object.keys(formats || {}).forEach(range => sheet.getRange(range).setNumberFormat(formats[range]));
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight("bold");
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+// ---------- 股價 ----------
+// 先問證交所（上市、上櫃都查得到，交易時間內是即時報價），
+// 查不到的再用 Google 財經（延遲約 20 分鐘）
+function getQuotes(codes) {
+  const list = [...new Set(codes.map(c => String(c).trim().toUpperCase()))]
+    .filter(c => /^[0-9A-Z]{4,6}$/.test(c)).slice(0, 60);
+  const out = {};
+  if (!list.length) return out;
+  try { Object.assign(out, misQuotes(list)); } catch (e) { /* 改用 Google 財經 */ }
+  const missing = list.filter(c => !out[c]);
+  if (missing.length) {
+    try { Object.assign(out, googleQuotes(missing)); } catch (e) { /* 查不到就算了 */ }
+  }
+  return out;
+}
+
+function misQuotes(codes) {
+  const out = {};
+  const home = UrlFetchApp.fetch("https://mis.twse.com.tw/stock/index.jsp", { muteHttpExceptions: true });
+  const setCookie = home.getAllHeaders()["Set-Cookie"] || [];
+  const cookie = [].concat(setCookie).map(c => String(c).split(";")[0]).join("; ");
+  for (let i = 0; i < codes.length; i += 20) {
+    const ex = codes.slice(i, i + 20).map(c => "tse_" + c + ".tw|otc_" + c + ".tw").join("|");
+    const url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?json=1&delay=0&ex_ch=" + encodeURIComponent(ex) + "&_=" + Date.now();
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { Cookie: cookie, Referer: "https://mis.twse.com.tw/stock/index.jsp" } });
+    if (res.getResponseCode() !== 200) continue;
+    const data = JSON.parse(res.getContentText());
+    (data.msgArray || []).forEach(m => {
+      const price = firstNumber([m.z, firstOf(m.b), firstOf(m.a), m.y]);
+      if (!price || !m.c) return;
+      out[m.c] = {
+        code: m.c, name: m.n || "", price: price, prev: Number(m.y) || null,
+        market: m.ex === "otc" ? "上櫃" : "上市",
+        time: m.d && m.t ? m.d.slice(4, 6) + "/" + m.d.slice(6, 8) + " " + m.t.slice(0, 5) : "",
+        source: "證交所即時"
+      };
+    });
+  }
+  return out;
+}
+
+function googleQuotes(codes) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(QUOTE_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(QUOTE_SHEET);
+    sheet.getRange("A:A").setNumberFormat("@");   // 0050 這種代號才不會變成 50
+    sheet.hideSheet();
+  }
+  sheet.clearContents();
+  const f = (field) => '=IFERROR(GOOGLEFINANCE("TPE:"&A{r},"' + field + '"),IFERROR(GOOGLEFINANCE("TWO:"&A{r},"' + field + '"),""))';
+  const rows = codes.map((c, i) => {
+    const r = i + 1;
+    return [c, f("price").replace(/\{r\}/g, r), f("closeyest").replace(/\{r\}/g, r), f("name").replace(/\{r\}/g, r)];
+  });
+  sheet.getRange(1, 1, rows.length, 4).setValues(rows);
+  const out = {};
+  for (let attempt = 0; attempt < 4; attempt++) {
+    SpreadsheetApp.flush();
+    const values = sheet.getRange(1, 1, rows.length, 4).getValues();
+    let waiting = false;
+    values.forEach(v => {
+      const price = Number(v[1]);
+      if (price > 0) {
+        out[String(v[0])] = { code: String(v[0]), name: String(v[3] || ""), price: price, prev: Number(v[2]) || null, market: "", time: "", source: "Google 財經（延遲）" };
+      } else if (String(v[1]).indexOf("Loading") >= 0) {
+        waiting = true;
+      }
+    });
+    if (!waiting) break;
+    Utilities.sleep(1500);
+  }
+  return out;
+}
+
+function firstOf(s) { return s ? String(s).split("_")[0] : ""; }
+function firstNumber(list) {
+  for (const v of list) { const n = Number(v); if (n > 0) return n; }
+  return 0;
+}
+
+// ---------- Gmail 提醒（由觸發條件每 15 分鐘執行 checkAll） ----------
+const APP_URL = "https://leearchi2024-design.github.io/lavi/";
+
+function checkAll() {
+  checkBills();     // 每月固定支出
+  checkTargets();   // 股票到價（只在交易時間）
+}
+
+// 讀出 App資料 裡某一種資料，例如 "rec:" 固定支出、"acc:" 帳戶
+function readData(prefix) {
+  const sheet = getDataSheet();
+  const last = sheet.getLastRow();
+  if (last < 2) return [];
+  return sheet.getRange(2, 1, last - 1, 5).getValues()
+    .filter(r => String(r[0]).indexOf(prefix) === 0 && !Number(r[3]))
+    .map(r => JSON.parse(r[4]));
+}
+
+function commas(n) { return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+
+// 固定支出：到了提醒時間還沒按「已繳費」或「略過」就寄信；過 3 天還沒處理再寄一次
+function checkBills() {
+  const bills = readData("rec:");
+  if (!bills.length) return;
+  const accName = {};
+  readData("acc:").forEach(a => { accName[a.id] = a.bank; });
+
+  const now = new Date();
+  const today = Utilities.formatDate(now, "Asia/Taipei", "yyyy-MM-dd");
+  const hm = Utilities.formatDate(now, "Asia/Taipei", "HH:mm");
+  const [y, m, d] = today.split("-").map(Number);
+  const monthKey = today.slice(0, 7);
+  const lastDay = new Date(y, m, 0).getDate();
+  const props = PropertiesService.getScriptProperties();
+  const lines = [];
+
+  bills.forEach(r => {
+    if (r.lastHandled === monthKey) return;                        // 這個月已繳費或略過
+    const dueDay = Math.min(Number(r.day) || 1, lastDay);          // 沒有 31 號的月份就算月底
+    const time = r.time || "09:00";
+    if (d < dueDay || (d === dueDay && hm < time)) return;         // 還沒到
+    const key = "bill:" + r.id + ":" + monthKey;
+    const sent = JSON.parse(props.getProperty(key) || "null");
+    let note = "";
+    if (!sent) {
+      props.setProperty(key, JSON.stringify({ n: 1, date: today }));
+    } else if (sent.n === 1 && (new Date(today) - new Date(sent.date)) / 86400000 >= 3) {
+      props.setProperty(key, JSON.stringify({ n: 2, date: today }));
+      note = "（第二次提醒：已經過了幾天還沒處理）";
+    } else {
+      return;
+    }
+    lines.push("・" + r.name + " NT$ " + commas(r.amount) + "　" + m + "/" + dueDay + " " + time + " 到期，預設從 " + (accName[r.accountId] || "未設定帳戶") + " 扣款" + note);
+  });
+
+  if (lines.length) {
+    MailApp.sendEmail(
+      Session.getEffectiveUser().getEmail(),
+      "記帳本：固定支出到期提醒",
+      lines.join("\n") + "\n\n繳完後，打開記帳本 App，在首頁的提醒裡按「已繳費」，這個月就不會再寄信。\n" + APP_URL
+    );
+  }
+}
+
+// ---------- 股票到價 ----------
+function checkTargets() {
+  const now = new Date();
+  const dow = Number(Utilities.formatDate(now, "Asia/Taipei", "u"));     // 1 = 星期一
+  const hm = Utilities.formatDate(now, "Asia/Taipei", "HH:mm");
+  if (dow > 5 || hm < "09:00" || hm > "13:35") return;                      // 只在台股交易時間檢查
+
+  const sheet = getDataSheet();
+  const last = sheet.getLastRow();
+  if (last < 2) return;
+  const stocks = sheet.getRange(2, 1, last - 1, 5).getValues()
+    .filter(r => String(r[0]).indexOf("stk:") === 0 && !Number(r[3]))
+    .map(r => JSON.parse(r[4]))
+    .filter(s => alertsOf(s).length);
+  if (!stocks.length) return;
+
+  const quotes = getQuotes(stocks.map(s => s.code));
+  const props = PropertiesService.getScriptProperties();
+  const today = Utilities.formatDate(now, "Asia/Taipei", "yyyy-MM-dd");
+  const hits = [];
+  const hit = (s, q, kind, price, text) => {
+    const key = "alert:" + s.code + ":" + kind + ":" + price;
+    if (props.getProperty(key) === today) return;   // 同一檔同一種提醒，一天只寄一次
+    props.setProperty(key, today);
+    hits.push(s.code + " " + (s.name || q.name) + "：現價 " + q.price + "，" + text);
+  };
+  stocks.forEach(s => {
+    const q = quotes[String(s.code).toUpperCase()];
+    if (!q) return;
+    alertsOf(s).forEach(a => {
+      if (a.side === "buy" && q.price <= a.price) hit(s, q, "buy", a.price, "已到買入價 " + a.price + " 以下");
+      if (a.side === "sell" && q.price >= a.price) hit(s, q, "sell", a.price, "已到賣出價 " + a.price + " 以上");
+    });
+  });
+  if (hits.length) {
+    MailApp.sendEmail(Session.getEffectiveUser().getEmail(), "記帳本：股票到價提醒", hits.join("\n") + "\n\n打開記帳本 App 查看詳情。");
+  }
+}
+
+// 每檔股票的到價提醒（新版可以有好幾個；舊版只有一個買入價、一個賣出價）
+function alertsOf(s) {
+  if (Array.isArray(s.alerts)) return s.alerts.map(a => ({ side: a.side, price: Number(a.price) })).filter(a => a.price > 0);
+  const out = [];
+  if (Number(s.target) > 0) out.push({ side: "buy", price: Number(s.target) });
+  if (Number(s.sellTarget) > 0) out.push({ side: "sell", price: Number(s.sellTarget) });
+  return out;
+}
+
+// ---------- 錯誤問題回報 → Notion ----------
+// 找「錯誤修正」底下日期最新的「錯誤修正_YYYY-MM-DD」頁，
+// 把回報加到「待修正」裡對應的分類下面；沒有這個分類就在「已修正」上方新增
+function notionToken() {
+  const props = PropertiesService.getScriptProperties();
+  if (NOTION_TOKEN) props.setProperty("NOTION_TOKEN", NOTION_TOKEN);   // 記住，之後更新程式碼不用再貼
+  return NOTION_TOKEN || props.getProperty("NOTION_TOKEN") || "";
+}
+
+function notion(method, path, payload) {
+  const res = UrlFetchApp.fetch("https://api.notion.com/v1/" + path, {
+    method: method,
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + notionToken(), "Notion-Version": "2022-06-28" },
+    payload: payload ? JSON.stringify(payload) : undefined,
+    muteHttpExceptions: true
+  });
+  const code = res.getResponseCode();
+  const data = JSON.parse(res.getContentText() || "{}");
+  if (code === 401) throw new Error("Notion 密鑰不對，請重新複製整合的密鑰");
+  if (code === 404) throw new Error("找不到 Notion 頁面，請在「錯誤修正」頁面的「連線」加入這個整合");
+  if (code >= 300) throw new Error("Notion 回應錯誤：" + (data.message || code));
+  return data;
+}
+
+function allChildren(blockId) {
+  let out = [], cursor = "";
+  do {
+    const data = notion("get", "blocks/" + blockId + "/children?page_size=100" + (cursor ? "&start_cursor=" + cursor : ""));
+    out = out.concat(data.results || []);
+    cursor = data.has_more ? data.next_cursor : "";
+  } while (cursor);
+  return out;
+}
+
+function plain(block) {
+  const b = block[block.type] || {};
+  return (b.rich_text || []).map(t => t.plain_text || "").join("").trim();
+}
+
+function writeReport(body) {
+  if (!notionToken()) throw new Error("還沒設定 Notion 密鑰，請照教學把密鑰貼到同步程式的 NOTION_TOKEN");
+  const message = String(body.message || "").trim().slice(0, 800);
+  const category = String(body.category || "其他").trim().slice(0, 20) || "其他";
+  if (!message) throw new Error("回報內容是空的");
+
+  // 1. 找最新的「錯誤修正_日期」頁
+  const pages = allChildren(NOTION_PARENT)
+    .filter(b => b.type === "child_page" && /\d{4}-\d{2}-\d{2}/.test(b.child_page.title))
+    .map(b => ({ id: b.id, title: b.child_page.title, date: b.child_page.title.match(/\d{4}-\d{2}-\d{2}/)[0] }));
+  if (!pages.length) throw new Error("「錯誤修正」底下找不到「錯誤修正_日期」的頁面");
+  pages.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const page = pages[pages.length - 1];
+
+  // 2. 找「待修正」「已修正」和分類標題的位置
+  const blocks = allChildren(page.id);
+  const isHeading = b => b.type === "heading_1" || b.type === "heading_2" || b.type === "heading_3";
+  const todoIdx = blocks.findIndex(b => b.type === "heading_2" && plain(b).indexOf("待修正") >= 0);
+  let doneIdx = blocks.findIndex(b => b.type === "heading_2" && plain(b).indexOf("已修正") >= 0);
+  if (doneIdx < 0) doneIdx = blocks.length;
+  const number = blocks.filter(b => b.type === "to_do").length + 1;
+  const today = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd");
+
+  const todo = {
+    object: "block", type: "to_do",
+    to_do: {
+      checked: false,
+      rich_text: [
+        { type: "text", text: { content: number + ". " + message + "（回報：" } },
+        { type: "mention", mention: { type: "date", date: { start: today } } },
+        { type: "text", text: { content: "）" } }
+      ]
+    }
+  };
+  const heading = { object: "block", type: "heading_3", heading_3: { rich_text: [{ type: "text", text: { content: category } }] } };
+
+  let children, after;
+  const catIdx = blocks.findIndex((b, i) => i > todoIdx && i < doneIdx && b.type === "heading_3" && plain(b) === category);
+  if (todoIdx < 0) {
+    children = [heading, todo];          // 沒有「待修正」標題：加在最後
+  } else if (catIdx >= 0) {
+    let end = catIdx + 1;                // 加在這個分類最後一項的後面
+    while (end < doneIdx && !isHeading(blocks[end])) end++;
+    children = [todo];
+    after = blocks[end - 1].id;
+  } else {
+    children = [heading, todo];          // 新分類：加在「已修正」上方
+    after = blocks[doneIdx - 1].id;
+  }
+  const payload = { children: children };
+  if (after) payload.after = after;
+  notion("patch", "blocks/" + page.id + "/children", payload);
+  return { page: page.title, number: number };
+}
+
+function num(v) { return Number(v) || 0; }
+function blank(v) { return v === "" || v === null || v === undefined ? "" : Number(v); }
+
+function reply(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}

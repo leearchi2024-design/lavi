@@ -467,3 +467,45 @@ input, select {
 .init-box[open] summary { margin-bottom: 10px; }
 .init-box .form-row { margin-bottom: 8px; }
 input[readonly] { background: var(--soft); }
+
+/* ---------- 20. 分類管理 ---------- */
+.icon-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.icon-pick {
+  aspect-ratio: 1; max-width: 100%; padding: 5px; border-radius: 12px;
+  border: 2px solid var(--soft); background: var(--paper); cursor: pointer;
+}
+.icon-pick[aria-pressed="true"] { border-color: var(--ink); background: var(--pop); }
+.btn-sm.danger-sm { border-color: var(--expense); color: var(--expense); }
+.link.small-link { align-self: flex-start; font-size: 13px; padding: 0; margin-top: -4px; }
+#tx-dynamic { display: flex; flex-direction: column; gap: 12px; }
+
+/* ---------- 21. 存錢筒照片與連結 ---------- */
+.photo-box { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.photo-preview { width: 96px; height: 96px; object-fit: cover; border-radius: 14px; border: 2px solid var(--ink); max-width: 100%; }
+.photo-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.photo-pick { cursor: pointer; }
+.wish-photo-btn { padding: 0; border: 0; background: none; cursor: pointer; display: block; width: 100%; }
+.wish-photo {
+  display: block; width: 100%; max-width: 100%; aspect-ratio: 4 / 3; object-fit: cover;
+  border-radius: 14px; border: 2px solid var(--ink);
+}
+.wish-link { font-size: 13px; font-weight: 700; color: var(--ink); text-decoration: underline; text-underline-offset: 3px; align-self: flex-start; }
+
+/* ---------- 22. 同步說明與錯誤回報 ---------- */
+.guide summary { cursor: pointer; font-weight: 700; font-size: 14px; }
+.guide[open] summary { margin-bottom: 10px; }
+.guide-title { display: block; font-size: 14px; margin: 12px 0 4px; }
+.guide-steps, .guide-list { margin: 0; padding-left: 22px; font-size: 13.5px; display: flex; flex-direction: column; gap: 6px; max-width: 65ch; }
+.guide code { font-family: var(--mono); font-size: 12px; background: var(--soft); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
+.copy-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.code-box {
+  width: 100%; height: 160px; margin-top: 8px; padding: 8px;
+  font-family: var(--mono); font-size: 11px; color: var(--ink);
+  background: var(--paper); border: 2px solid var(--ink); border-radius: 12px;
+}
+.report-box { border-top: 2px dashed var(--ink); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+textarea {
+  width: 100%; min-width: 0; padding: 9px 12px; resize: vertical;
+  font: inherit; font-size: 16px; color: var(--ink);
+  background: var(--paper); border: 2px solid var(--ink); border-radius: 14px;
+}
