@@ -1,5 +1,5 @@
 /**
- * 我的記帳本：Google 試算表同步程式（第 5 版）
+ * 我的記帳本：Google 試算表同步程式（第 6 版）
  * ------------------------------------------------------------
  * App 每次資料有變動，就會把變動送到這裡，這段程式會更新四個工作表：
  *   記帳紀錄：每一筆收入、支出、轉帳
@@ -11,17 +11,15 @@
  * Gmail 提醒（固定支出到期、股票到價，選用）：在 Apps Script 左邊的「觸發條件」
  * 新增 checkAll，選「時間驅動」→「分鐘計時器」→「每 15 分鐘」。
  *
- * 錯誤問題回報寫入 Notion（選用）：把 Notion 整合的密鑰貼在下面 NOTION_TOKEN，
- * 並在 Notion「錯誤修正」頁面的「連線」加入這個整合。貼過一次之後會記住，
- * 以後更新程式碼時 NOTION_TOKEN 留空也可以。
+ * 錯誤問題回報：App 送出的回報會寄到 Gmail。下面 REPORT_EMAIL 留空就寄到
+ * 擁有這份試算表的 Google 帳號；要寄到別的信箱，只在 Apps Script 裡填，不要填在 GitHub 那份。
  *
  * ⚠️ 下面 TOKEN 雙引號裡，請填你自己的同步密碼（和 App 裡填的一樣）。
  * ⚠️ 不要把這段程式上傳到 GitHub，密碼會被別人看到。
  */
 const TOKEN = "請改成你的同步密碼";
-const NOTION_TOKEN = "";                                   // Notion 整合密鑰（ntn_ 開頭），選用
-const NOTION_PARENT = "40ed474379d8808eb6c4fc8da089cef5";  // Notion「錯誤修正」頁面
-const VERSION = 5;
+const REPORT_EMAIL = "";   // 問題回報收件信箱，留空＝擁有試算表的 Gmail
+const VERSION = 6;
 const QUOTE_SHEET = "股價";
 const DATA_SHEET = "App資料";
 
@@ -57,7 +55,7 @@ function doPost(e) {
       return reply({ ok: false, version: VERSION, error: "同步密碼不對，請確認 App 和程式碼裡的密碼一樣" });
     }
     if (body.action === "report") {
-      return reply(Object.assign({ ok: true, version: VERSION }, writeReport(body)));
+      return reply(Object.assign({ ok: true, version: VERSION }, sendReport(body)));
     }
     if (body.action === "quotes") {
       return reply({ ok: true, version: VERSION, quotes: getQuotes(body.codes || []) });
@@ -390,99 +388,16 @@ function alertsOf(s) {
   return out;
 }
 
-// ---------- 錯誤問題回報 → Notion ----------
-// 找「錯誤修正」底下日期最新的「錯誤修正_YYYY-MM-DD」頁，
-// 把回報加到「待修正」裡對應的分類下面；沒有這個分類就在「已修正」上方新增
-function notionToken() {
-  const props = PropertiesService.getScriptProperties();
-  if (NOTION_TOKEN) props.setProperty("NOTION_TOKEN", NOTION_TOKEN);   // 記住，之後更新程式碼不用再貼
-  return NOTION_TOKEN || props.getProperty("NOTION_TOKEN") || "";
-}
-
-function notion(method, path, payload) {
-  const res = UrlFetchApp.fetch("https://api.notion.com/v1/" + path, {
-    method: method,
-    contentType: "application/json",
-    headers: { Authorization: "Bearer " + notionToken(), "Notion-Version": "2022-06-28" },
-    payload: payload ? JSON.stringify(payload) : undefined,
-    muteHttpExceptions: true
-  });
-  const code = res.getResponseCode();
-  const data = JSON.parse(res.getContentText() || "{}");
-  if (code === 401) throw new Error("Notion 密鑰不對，請重新複製整合的密鑰");
-  if (code === 404) throw new Error("找不到 Notion 頁面，請在「錯誤修正」頁面的「連線」加入這個整合");
-  if (code >= 300) throw new Error("Notion 回應錯誤：" + (data.message || code));
-  return data;
-}
-
-function allChildren(blockId) {
-  let out = [], cursor = "";
-  do {
-    const data = notion("get", "blocks/" + blockId + "/children?page_size=100" + (cursor ? "&start_cursor=" + cursor : ""));
-    out = out.concat(data.results || []);
-    cursor = data.has_more ? data.next_cursor : "";
-  } while (cursor);
-  return out;
-}
-
-function plain(block) {
-  const b = block[block.type] || {};
-  return (b.rich_text || []).map(t => t.plain_text || "").join("").trim();
-}
-
-function writeReport(body) {
-  if (!notionToken()) throw new Error("還沒設定 Notion 密鑰，請照教學把密鑰貼到同步程式的 NOTION_TOKEN");
-  const message = String(body.message || "").trim().slice(0, 800);
+// ---------- 錯誤問題回報 → Gmail ----------
+function sendReport(body) {
+  const message = String(body.message || "").trim().slice(0, 2000);
   const category = String(body.category || "其他").trim().slice(0, 20) || "其他";
   if (!message) throw new Error("回報內容是空的");
-
-  // 1. 找最新的「錯誤修正_日期」頁
-  const pages = allChildren(NOTION_PARENT)
-    .filter(b => b.type === "child_page" && /\d{4}-\d{2}-\d{2}/.test(b.child_page.title))
-    .map(b => ({ id: b.id, title: b.child_page.title, date: b.child_page.title.match(/\d{4}-\d{2}-\d{2}/)[0] }));
-  if (!pages.length) throw new Error("「錯誤修正」底下找不到「錯誤修正_日期」的頁面");
-  pages.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
-  const page = pages[pages.length - 1];
-
-  // 2. 找「待修正」「已修正」和分類標題的位置
-  const blocks = allChildren(page.id);
-  const isHeading = b => b.type === "heading_1" || b.type === "heading_2" || b.type === "heading_3";
-  const todoIdx = blocks.findIndex(b => b.type === "heading_2" && plain(b).indexOf("待修正") >= 0);
-  let doneIdx = blocks.findIndex(b => b.type === "heading_2" && plain(b).indexOf("已修正") >= 0);
-  if (doneIdx < 0) doneIdx = blocks.length;
-  const number = blocks.filter(b => b.type === "to_do").length + 1;
-  const today = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd");
-
-  const todo = {
-    object: "block", type: "to_do",
-    to_do: {
-      checked: false,
-      rich_text: [
-        { type: "text", text: { content: number + ". " + message + "（回報：" } },
-        { type: "mention", mention: { type: "date", date: { start: today } } },
-        { type: "text", text: { content: "）" } }
-      ]
-    }
-  };
-  const heading = { object: "block", type: "heading_3", heading_3: { rich_text: [{ type: "text", text: { content: category } }] } };
-
-  let children, after;
-  const catIdx = blocks.findIndex((b, i) => i > todoIdx && i < doneIdx && b.type === "heading_3" && plain(b) === category);
-  if (todoIdx < 0) {
-    children = [heading, todo];          // 沒有「待修正」標題：加在最後
-  } else if (catIdx >= 0) {
-    let end = catIdx + 1;                // 加在這個分類最後一項的後面
-    while (end < doneIdx && !isHeading(blocks[end])) end++;
-    children = [todo];
-    after = blocks[end - 1].id;
-  } else {
-    children = [heading, todo];          // 新分類：加在「已修正」上方
-    after = blocks[doneIdx - 1].id;
-  }
-  const payload = { children: children };
-  if (after) payload.after = after;
-  notion("patch", "blocks/" + page.id + "/children", payload);
-  return { page: page.title, number: number };
+  const to = REPORT_EMAIL || Session.getEffectiveUser().getEmail();
+  const time = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm");
+  // 標題：[記帳本問題回饋_時間_類型]；內文：使用者留下的問題
+  MailApp.sendEmail(to, "[記帳本問題回饋_" + time + "_" + category + "]", message);
+  return { sentTo: to };
 }
 
 function num(v) { return Number(v) || 0; }

@@ -777,7 +777,7 @@ function viewReports() {
     </div>
     <div class="report-box">
       <b>錯誤問題回報</b>
-      <p class="small muted">遇到問題或想要新功能，寫下來送出，會自動記到 Notion「錯誤修正」最新一頁的待修正清單。</p>
+      <p class="small muted">遇到問題或想要新功能，寫下來送出，會寄到你的 Gmail。</p>
       <button class="btn-secondary" data-action="report-bug">回報問題</button>
     </div>
     <input type="file" id="restore-file" accept=".json,application/json" hidden>
@@ -2928,15 +2928,15 @@ const REPORT_CATEGORIES = ["記帳", "帳戶", "資金確認", "固定支出", "
 function openReportForm() {
   if (!syncEnabled()) {
     openSheet("錯誤問題回報", `<div class="stack">
-      <p class="small">回報會透過 Google 試算表的同步程式送到 Notion，所以要先設定雲端同步。</p>
+      <p class="small">回報會透過 Google 試算表的同步程式寄到 Gmail，所以要先設定雲端同步。</p>
       <button type="button" class="btn-primary" data-action="sync-settings">設定同步</button>
     </div>`);
     return;
   }
   openSheet("錯誤問題回報", `<form id="report-form" novalidate>
     ${field("跟哪個功能有關", `<select id="r-cat">${REPORT_CATEGORIES.map(c => `<option>${c}</option>`).join("")}</select>`)}
-    ${field("發生什麼問題，或希望怎麼改", `<textarea id="r-msg" rows="5" maxlength="800" placeholder="例如：轉帳的時候想要可以扣手續費"></textarea>`)}
-    <p class="small muted">送出後會寫進 Notion「錯誤修正」裡日期最新的那一頁，放在「待修正」對應的分類下面。</p>
+    ${field("發生什麼問題，或希望怎麼改", `<textarea id="r-msg" rows="5" maxlength="2000" placeholder="例如：轉帳的時候想要可以扣手續費"></textarea>`)}
+    <p class="small muted">送出後會寄一封信到你的 Gmail，標題是「[記帳本問題回饋_時間_類型]」，內文就是你寫的內容。</p>
     ${formActions(false, "送出回報")}
   </form>`);
   bindSave("report-form", async () => {
@@ -2946,9 +2946,9 @@ function openReportForm() {
     btn.disabled = true;
     btn.textContent = "送出中…";
     try {
-      const res = await postToSheet({ action: "report", category: $("r-cat").value, message }, 5);
+      const res = await postToSheet({ action: "report", category: $("r-cat").value, message }, 6);
       closeSheet();
-      toast(`已送出，記在「${res.page}」第 ${res.number} 項`);
+      toast(`已寄出到 ${res.sentTo || "你的 Gmail"}`);
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "送出回報";
