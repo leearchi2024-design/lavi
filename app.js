@@ -777,7 +777,7 @@ function viewReports() {
     </div>
     <div class="report-box">
       <b>錯誤問題回報</b>
-      <p class="small muted">遇到問題或想要新功能，寫下來送出，會寄到你的 Gmail。</p>
+      <p class="small muted">遇到問題或想要新功能，寫下來送出，會寄給記帳本作者。</p>
       <button class="btn-secondary" data-action="report-bug">回報問題</button>
     </div>
     <input type="file" id="restore-file" accept=".json,application/json" hidden>
@@ -1911,6 +1911,48 @@ function openCheckDetail(c) {
   });
 }
 
+// ========== 7-0. 公用服務（作者架設，所有人共用：查股價、問題回報） ==========
+// 網址寫在 GitHub 上的 config.json；這個服務碰不到任何人的記帳資料
+const serviceState = { url: "", loaded: false };
+function serviceUrl() { return serviceState.url; }
+
+function loadServiceConfig() {
+  return fetch("config.json", { cache: "no-store" })
+    .then(r => (r.ok ? r.json() : {}))
+    .catch(() => ({}))
+    .then(cfg => {
+      const url = String(cfg.publicServiceUrl || "").trim();
+      serviceState.url = /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(url) ? url : "";
+      serviceState.loaded = true;
+    });
+}
+
+async function postToService(payload) {
+  let res;
+  try {
+    res = await fetch(serviceState.url, { method: "POST", body: JSON.stringify(payload) });
+  } catch (e) {
+    throw new Error("連不到公用服務，請檢查網路");
+  }
+  let data;
+  try { data = await res.json(); } catch (e) { throw new Error("公用服務沒有正確回應，請稍後再試"); }
+  if (!data.ok) throw new Error(data.error || "公用服務發生錯誤");
+  return data;
+}
+
+// 查股價：有設定自己的同步就用自己的，沒有就用公用服務
+function canQuote() { return syncEnabled() || !!serviceUrl(); }
+async function quotesFrom(codes) {
+  if (syncEnabled()) {
+    try {
+      return (await postToSheet({ action: "quotes", codes }, 4)).quotes || {};
+    } catch (e) {
+      if (!serviceUrl()) throw e;   // 自己的同步程式查不到時，改用公用服務
+    }
+  }
+  return (await postToService({ action: "quotes", codes })).quotes || {};
+}
+
 // ========== 7-3. 股票 ==========
 // 股價透過 Google 試算表的同步程式查詢（瀏覽器不能直接向證交所查）
 // quotes 只存在這台裝置；股票清單（stocks）會跟著雲端同步
@@ -1953,8 +1995,9 @@ function changeText(q) {
 
 async function fetchQuotes(force) {
   if (!stocks.length || quoteState.busy) return;
-  if (!syncEnabled()) {
-    quoteState.error = "要先在「報表」設定雲端同步，才能查詢股價。";
+  if (!canQuote()) {
+    if (!serviceState.loaded) return;   // 設定檔還在讀取，等一下會再查
+    quoteState.error = "目前無法查詢股價：公用服務還沒設定，也還沒設定雲端同步。";
     if (ui.tab === "stocks") render();
     return;
   }
@@ -1964,7 +2007,7 @@ async function fetchQuotes(force) {
   if (ui.tab === "stocks") render();
   const codes = [...new Set(stocks.map(s => s.code))];
   try {
-    const res = await postToSheet({ action: "quotes", codes }, 4);
+    const res = { quotes: await quotesFrom(codes) };
     Object.assign(quotes, res.quotes || {});
     save("bookkeeping-quotes", quotes);
     quoteState.at = Date.now();
@@ -2326,12 +2369,12 @@ function openStockForm(st) {
   $("f-lookup").onclick = async () => {
     const code = $("f-code").value.trim().toUpperCase();
     if (!/^[0-9A-Z]{4,6}$/.test(code)) return showErr("股票代號是 4 到 6 碼的數字或英文，例如 2330、00878。");
-    if (!syncEnabled()) return showErr("要先在「報表」設定雲端同步，才能查詢股價。名稱可以先自己輸入。");
+    if (!canQuote()) return showErr("目前無法查詢股價，名稱可以先自己輸入。");
     showErr("");
     $("f-lookup").disabled = true;
     $("f-lookup").textContent = "查詢中…";
     try {
-      const res = await postToSheet({ action: "quotes", codes: [code] }, 4);
+      const res = { quotes: await quotesFrom([code]) };
       const q = (res.quotes || {})[code];
       if (!q) {
         notFound = code;
@@ -2926,17 +2969,20 @@ function copySyncCode(sfx = "") {
 // ---------- 錯誤問題回報 ----------
 const REPORT_CATEGORIES = ["記帳", "帳戶", "資金確認", "固定支出", "股票系統", "存錢筒", "轉帳功能", "報表", "雲端同步", "其他"];
 function openReportForm() {
-  if (!syncEnabled()) {
+  if (!serviceUrl() && !syncEnabled()) {
     openSheet("錯誤問題回報", `<div class="stack">
-      <p class="small">回報會透過 Google 試算表的同步程式寄到 Gmail，所以要先設定雲端同步。</p>
-      <button type="button" class="btn-primary" data-action="sync-settings">設定同步</button>
+      <p class="small">目前還不能送出回報：記帳本作者還沒設定公用服務。</p>
+      <button type="button" class="btn-primary" data-action="close-sheet">知道了</button>
     </div>`);
     return;
   }
+  let savedName = "";
+  try { savedName = localStorage.getItem("bookkeeping-reporter") || ""; } catch (e) { /* 沒有也沒關係 */ }
   openSheet("錯誤問題回報", `<form id="report-form" novalidate>
     ${field("跟哪個功能有關", `<select id="r-cat">${REPORT_CATEGORIES.map(c => `<option>${c}</option>`).join("")}</select>`)}
     ${field("發生什麼問題，或希望怎麼改", `<textarea id="r-msg" rows="5" maxlength="2000" placeholder="例如：轉帳的時候想要可以扣手續費"></textarea>`)}
-    <p class="small muted">送出後會寄一封信到你的 Gmail，標題是「[記帳本問題回饋_時間_類型]」，內文就是你寫的內容。</p>
+    ${field("你的名字（選填，讓作者知道是誰回報的）", `<input id="r-name" maxlength="30" value="${esc(savedName)}" autocomplete="name">`)}
+    <p class="small muted">送出後會寄給記帳本作者。不會附上你的記帳資料。</p>
     ${formActions(false, "送出回報")}
   </form>`);
   bindSave("report-form", async () => {
@@ -2946,9 +2992,13 @@ function openReportForm() {
     btn.disabled = true;
     btn.textContent = "送出中…";
     try {
-      const res = await postToSheet({ action: "report", category: $("r-cat").value, message }, 6);
+      const name = $("r-name").value.trim();
+      try { localStorage.setItem("bookkeeping-reporter", name); } catch (e) { /* 沒有也沒關係 */ }
+      const payload = { action: "report", category: $("r-cat").value, message, name };
+      if (serviceUrl()) await postToService(payload);     // 寄給作者（公用服務）
+      else await postToSheet(payload, 6);                  // 沒有公用服務時，寄到自己的 Gmail
       closeSheet();
-      toast(`已寄出到 ${res.sentTo || "你的 Gmail"}`);
+      toast("已送出，謝謝你的回報！");
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "送出回報";
@@ -3152,7 +3202,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) flus
 setInterval(() => { if (syncEnabled() && !document.hidden) flushSync(); }, 60000);            // 開著時每分鐘
 
 // 股價：打開 App 時查一次；之後在「股票」或「首頁」時自動更新（交易時間每 30 秒、其他時間每 10 分鐘）
-fetchQuotes(false);
+loadServiceConfig().then(() => { quoteState.error = ""; fetchQuotes(false); });
 setInterval(() => { if (!document.hidden && (ui.tab === "stocks" || ui.tab === "home")) fetchQuotes(false); }, 30000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) fetchQuotes(false); });
 
